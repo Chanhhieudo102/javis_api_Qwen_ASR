@@ -1,0 +1,25 @@
+import os
+
+# --- Model ---
+MODEL_NAME = os.getenv("QWEN_MODEL_NAME", "Qwen/Qwen3-ASR-1.7B")
+GPU_MEMORY_UTILIZATION = float(os.getenv("GPU_MEMORY_UTILIZATION", "0.6"))
+
+# --- Audio ---
+SAMPLE_RATE = 16_000
+SAMPLES_PER_MS = SAMPLE_RATE // 1000  # 16
+
+# --- Streaming ASR ---
+CHUNK_SIZE_SEC = 1.5
+UNFIXED_CHUNK_NUM = 2
+UNFIXED_TOKEN_NUM = 5
+
+# --- VAD ---
+VAD_SILENCE_THRESHOLD_MS = 1000
+VAD_WINDOW_SIZE_SAMPLES = 512
+
+# --- Soniox compat ---
+DEFAULT_SPEAKER_ID = "SPEAKER_1"
+
+# --- Concurrency ---
+MAX_CONCURRENT_SESSIONS = int(os.getenv("MAX_CONCURRENT_SESSIONS", "10"))
+

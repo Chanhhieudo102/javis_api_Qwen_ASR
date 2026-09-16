@@ -1,0 +1,40 @@
+# Error messages in Vietnamese
+internal_server_error:
+  code: "ERR.SER0101"
+  message: "Lỗi máy chủ nội bộ"
+
+bad_request:
+  code: "ERR.REQ0101"
+  message: "Yêu cầu không hợp lệ"
+
+unauthorized:
+  code: "ERR.AUTH0101"
+  message: "Chưa xác thực"
+
+forbidden:
+  code: "ERR.AUTH0102"
+  message: "Không có quyền truy cập"
+
+not_found:
+  code: "ERR.RES0101"
+  message: "Không tìm thấy tài nguyên"
+
+user_not_found:
+  code: "ERR.USR0101"
+  message: "Không tìm thấy người dùng"
+
+user_already_exists:
+  code: "ERR.USR0102"
+  message: "Người dùng đã tồn tại"
+
+invalid_credentials:
+  code: "ERR.AUTH0103"
+  message: "Thông tin đăng nhập không hợp lệ"
+
+token_expired:
+  code: "ERR.AUTH0104"
+  message: "Token đã hết hạn"
+
+token_invalid:
+  code: "ERR.AUTH0105"
+  message: "Token không hợp lệ"

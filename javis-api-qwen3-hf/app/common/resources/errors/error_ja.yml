@@ -1,0 +1,40 @@
+# Error messages in Japanese
+internal_server_error:
+  code: "ERR.SER0101"
+  message: "内部サーバーエラー"
+
+bad_request:
+  code: "ERR.REQ0101"
+  message: "不正なリクエスト"
+
+unauthorized:
+  code: "ERR.AUTH0101"
+  message: "認証が必要です"
+
+forbidden:
+  code: "ERR.AUTH0102"
+  message: "アクセスが禁止されています"
+
+not_found:
+  code: "ERR.RES0101"
+  message: "リソースが見つかりません"
+
+user_not_found:
+  code: "ERR.USR0101"
+  message: "ユーザーが見つかりません"
+
+user_already_exists:
+  code: "ERR.USR0102"
+  message: "ユーザーは既に存在します"
+
+invalid_credentials:
+  code: "ERR.AUTH0103"
+  message: "認証情報が無効です"
+
+token_expired:
+  code: "ERR.AUTH0104"
+  message: "トークンの有効期限が切れています"
+
+token_invalid:
+  code: "ERR.AUTH0105"
+  message: "トークンが無効です"

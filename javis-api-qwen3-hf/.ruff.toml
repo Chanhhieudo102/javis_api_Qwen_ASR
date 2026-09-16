@@ -1,0 +1,39 @@
+# Ruff config
+line-length = 100
+indent-width = 4
+
+[format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+docstring-code-format = true
+
+[lint]
+select = ["E", "F", "I", "W", "D", "N"]
+ignore = [
+    "D100",
+    "D101",
+    "D103",
+    "D104",
+    "D106",
+    "D203",
+    "D213",
+    "D417",
+    "E501",
+    "D415",
+    "D400"
+]
+exclude = [
+    "migrations",
+    "__pycache__",
+    ".venv",
+    "venv",
+    ".git",
+    ".hg",
+    ".svn",
+    ".tox",
+    ".nox",
+    ".eggs",
+    "*.egg",
+    "tests/*"
+]

@@ -1,0 +1,205 @@
+# =============================================================================
+# Error Messages Configuration (English)
+# =============================================================================
+# Format:
+#   error_key:
+#     code: "ERR.<MODULE><NUMBER>"
+#     message: "Human readable message"
+#
+# Module Codes:
+#   SYS - System/Server errors
+#   AUTH - Authentication/Authorization errors
+#   USR - User module errors
+#   ZON - Zone module errors
+#   TBL - Table module errors
+#   ORD - Order module errors
+#   VAL - Validation errors
+#   REQ - Request errors
+#   RES - Resource errors
+# =============================================================================
+
+
+# =============================================================================
+# SYSTEM / COMMON ERRORS
+# =============================================================================
+
+internal_server_error:
+  code: "ERR.SYS0101"
+  message: "Internal server error"
+
+bad_request:
+  code: "ERR.SYS0102"
+  message: "Bad request"
+
+not_found:
+  code: "ERR.SYS0103"
+  message: "Resource not found"
+
+
+# =============================================================================
+# AUTH MODULE ERRORS
+# =============================================================================
+
+unauthorized:
+  code: "ERR.AUTH0101"
+  message: "Unauthorized"
+
+forbidden:
+  code: "ERR.AUTH0102"
+  message: "Forbidden"
+
+invalid_credentials:
+  code: "ERR.AUTH0103"
+  message: "Invalid credentials"
+
+token_expired:
+  code: "ERR.AUTH0104"
+  message: "Token expired"
+
+token_invalid:
+  code: "ERR.AUTH0105"
+  message: "Invalid token"
+
+owner_already_exists:
+  code: "ERR.AUTH0106"
+  message: "Owner already exists. Only one owner can be registered."
+
+
+# =============================================================================
+# USER MODULE ERRORS
+# =============================================================================
+
+user_not_found:
+  code: "ERR.USR0101"
+  message: "User not found"
+
+user_already_exists:
+  code: "ERR.USR0102"
+  message: "User already exists"
+
+email_already_exists:
+  code: "ERR.USR0103"
+  message: "Email already exists"
+
+username_already_exists:
+  code: "ERR.USR0104"
+  message: "Username already exists"
+
+cannot_create_owner_as_employee:
+  code: "ERR.USR0105"
+  message: "Cannot create owner role as employee"
+
+
+# =============================================================================
+# ZONE MODULE ERRORS
+# =============================================================================
+
+zone_not_found:
+  code: "ERR.ZON0101"
+  message: "Zone not found"
+
+
+# =============================================================================
+# TABLE MODULE ERRORS
+# =============================================================================
+
+table_not_found:
+  code: "ERR.TBL0101"
+  message: "Table not found"
+
+table_number_already_exists:
+  code: "ERR.TBL0102"
+  message: "Table number already exists"
+
+
+# =============================================================================
+# MENU CATEGORY MODULE ERRORS
+# =============================================================================
+
+category_not_found:
+  code: "ERR.CAT0101"
+  message: "Menu category not found"
+
+category_name_already_exists:
+  code: "ERR.CAT0102"
+  message: "Category name already exists"
+
+
+# =============================================================================
+# MENU ITEM MODULE ERRORS
+# =============================================================================
+
+menu_item_not_found:
+  code: "ERR.MNU0101"
+  message: "Menu item not found"
+
+menu_item_not_available:
+  code: "ERR.MNU0102"
+  message: "Menu item is not available"
+
+
+# =============================================================================
+# ORDER ITEM MODULE ERRORS
+# =============================================================================
+
+order_item_not_found:
+  code: "ERR.ORD0101"
+  message: "Order item not found"
+
+cannot_update_cancelled_order:
+  code: "ERR.ORD0102"
+  message: "Cannot update cancelled order item"
+
+invalid_quantity:
+  code: "ERR.ORD0103"
+  message: "Quantity must be greater than 0"
+
+invalid_status_transition:
+  code: "ERR.ORD0104"
+  message: "Invalid status transition"
+
+order_already_cancelled:
+  code: "ERR.ORD0105"
+  message: "Order item is already cancelled"
+
+cannot_cancel_served_order:
+  code: "ERR.ORD0106"
+  message: "Cannot cancel served order item"
+
+can_only_delete_pending_order:
+  code: "ERR.ORD0107"
+  message: "Can only delete order items with PENDING status"
+
+
+# =============================================================================
+# ORDER MODULE ERRORS
+# =============================================================================
+
+order_not_found:
+  code: "ERR.ORD0201"
+  message: "Order not found"
+
+no_open_order_for_table:
+  code: "ERR.ORD0202"
+  message: "No open order found for this table"
+
+order_has_no_items:
+  code: "ERR.ORD0203"
+  message: "Order has no items"
+
+
+# =============================================================================
+# BILL MODULE ERRORS
+# =============================================================================
+
+bill_not_found:
+  code: "ERR.BIL0101"
+  message: "Bill not found"
+
+cannot_delete_paid_bill:
+  code: "ERR.BIL0102"
+  message: "Cannot delete a paid bill"
+
+cannot_update_paid_bill:
+  code: "ERR.BIL0103"
+  message: "Cannot update a paid bill"
