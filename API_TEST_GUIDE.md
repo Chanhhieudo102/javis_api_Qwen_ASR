@@ -50,13 +50,14 @@ Client này cung cấp giao diện Web Gradio để thu âm trực tiếp qua mi
 
 **Lệnh chạy:**
 ```bash
-python 03_openai_realtime_microphone_client_adaptive.py --ws-url wss://<MODAL_HOST>/api/v2/transcript/ws/no-diarization
+# Sử dụng Python 3.11 (hoặc py -3.11):
+py -3.11 03_openai_realtime_microphone_client_adaptive.py --ws-url wss://<MODAL_HOST>/api/v2/transcript/ws/no-diarization
 ```
 
 > **Thay `<MODAL_HOST>` bằng host bạn lấy được ở Bước 2 (không bao gồm `https://`).**
-> Ví dụ: `python 03_openai_realtime_microphone_client_adaptive.py --ws-url wss://your-workspace--javis-api-qwen3-hf-serve-serve.modal.run/api/v2/transcript/ws/no-diarization`
+> Ví dụ: `py -3.11 03_openai_realtime_microphone_client_adaptive.py --ws-url wss://your-workspace--javis-api-qwen3-hf-serve-serve.modal.run/api/v2/transcript/ws/no-diarization`
 
-*(Nếu bạn chạy server Local không qua Modal, bạn có thể chạy: `python 03_openai_realtime_microphone_client_adaptive.py --ws-url ws://localhost:8000/api/v2/transcript/ws/no-diarization`)*
+*(Nếu bạn chạy server Local không qua Modal, bạn có thể chạy: `py -3.11 03_openai_realtime_microphone_client_adaptive.py --ws-url ws://localhost:8000/api/v2/transcript/ws/no-diarization`)*
 
 
 ### Sử dụng Client:
@@ -64,3 +65,28 @@ python 03_openai_realtime_microphone_client_adaptive.py --ws-url wss://<MODAL_HO
 2. Bấm nút **Start** và bắt đầu nói vào Microphone.
 3. Chờ xem kết quả trả về liên tục (Streaming) trên giao diện.
 4. Bạn cũng có thể mở rộng phần "Đánh Giá Độ Chính Xác (ASR CER Evaluation)" để so sánh kết quả với file Ground Truth có sẵn.
+
+---
+
+## Bước 4: Kiểm thử LangGraph Transcript Analysis API
+
+Sau khi có văn bản thô từ ASR, bạn có thể gọi LangGraph pipeline để làm sạch dấu câu, tóm tắt và trích xuất action items:
+
+**Endpoint:** `POST /api/v2/transcript/analyze`
+
+**Ví dụ cURL:**
+```bash
+curl -X POST "https://<MODAL_HOST>/api/v2/transcript/analyze" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "raw_transcript": "hôm nay chúng ta họp về tiến độ dự án anh nam sẽ hoàn thành api vào thứ sáu còn chị hoa sẽ kiểm thử trước thứ hai tuần tới",
+    "language": "Vietnamese"
+  }'
+```
+
+**Chạy Unit Tests cho LangGraph (Python 3.11):**
+```powershell
+cd javis-api-qwen3-hf
+.\.venv\Scripts\pytest.exe tests/test_agent_graphs.py -v
+```
+

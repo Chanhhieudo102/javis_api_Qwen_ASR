@@ -215,17 +215,54 @@ def evaluate_texts(ref_raw: str, hyp_raw: str, verbose: bool = True):
     }
 
 
+class JapaneseASREvaluator:
+    """ASR evaluation standard for Japanese text."""
+
+    @staticmethod
+    def normalize_strict(text: str) -> str:
+        """1. CER Strict: Giữ nguyên Hán tự & Katakana, chỉ bỏ speaker label, timestamp, khoảng trắng/xuống dòng."""
+        text = remove_speaker_and_timestamps(text)
+        return re.sub(r'[\s\u3000\r\n]+', '', text)
+
+    @staticmethod
+    def normalize_standard(text: str) -> str:
+        """2. CER Standard: Chuẩn hóa NFKC, bỏ speaker, timestamp, dấu câu và khoảng trắng."""
+        text = unicodedata.normalize('NFKC', text)
+        text = remove_speaker_and_timestamps(text)
+        text = re.sub(r'[、。・！？「」『』【】〔〕《》〈〉（）(),.!?\-—…～~・゛゜ー]+', '', text)
+        return re.sub(r'[\s\u3000\r\n]+', '', text)
+
+    @staticmethod
+    def normalize_loose(text: str) -> str:
+        """3. CER Loose: Chuẩn hóa ngữ âm Hiragana qua Janome, loại bỏ dấu câu và filler words."""
+        return clean_text(text)
+
+    @staticmethod
+    def calc_cer(ref: str, hyp: str) -> float:
+        """Calculate CER in ratio [0.0, 1.0]."""
+        if not ref:
+            return 0.0 if not hyp else 1.0
+        dist, _ = levenshtein_distance(ref, hyp)
+        return dist / len(ref)
+
+
 if __name__ == '__main__':
     import os
+
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    GT_DIR = os.path.join(BASE_DIR, "ground_truth")
 
     default_ref = """
 お電話ありがとうございます。建設のエスタと申します。あ、いつもお世話になってます。AJテクノロジーズの山下です。はい、お世話になっております。お世話になります。すいません、カセさんってお戻りになられてますか？あ、ちょっと今外出しちゃってるんですけども。あ、かしこまりました。じゃあまた改めてご連絡させていただきます。あ、はい、かしこまりました。すいません、どうもありがとうございます。はい、失礼いたします。失礼いたします。
 """
     default_hyp = """
-お電話ありがとうございます。三水建設の須藤と申します。いつもお世話になってます。AJテクノロジーズの山下です。はい、お世話になっております。お世話になります。すみません、川本さんともどうになられてますか。あ、ちょっと今外出しちゃってるんですけれども。かしこまりました。じゃあまた改めてご連絡させていただきます。はい、かしこまりました。すみません、どうもありがとうございます。はい、失礼いたします。失礼いたします。
+ありがとうございます。三水建設の須田と申します。いつもお世話になってます。AJテクノロジーズの山下です。はい、お世話になっております。お世話になります。すみません、川本さんともどうになられてますか。あ、ちょっと今外出しちゃってるんです。あ、けれども。かしこまりました。また改めてご連絡させていただきます。かしこまりました。すみません、どうもありがとうございます。はい、失礼いたします。失礼いたします。
 """
     if len(sys.argv) >= 3:
         p1, p2 = sys.argv[1], sys.argv[2]
+        # Hỗ trợ tìm trong thư mục ground_truth nếu p1 chỉ là tên file
+        if not os.path.isfile(p1) and os.path.isfile(os.path.join(GT_DIR, p1)):
+            p1 = os.path.join(GT_DIR, p1)
         ref = open(p1, encoding='utf-8').read() if os.path.isfile(p1) else p1
         hyp = open(p2, encoding='utf-8').read() if os.path.isfile(p2) else p2
     else:

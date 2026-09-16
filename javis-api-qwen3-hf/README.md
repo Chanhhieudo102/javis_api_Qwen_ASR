@@ -7,34 +7,27 @@ A FastAPI backend project with clean architecture.
 ```
 be/
 ├── app/
+│   ├── agent/                  # Common Agent Layer (Single Provider, Fallbacks, Tracing)
+│   │   ├── clients/            # ChatModel Protocol & RunnableChatModel wrapper
+│   │   ├── constants/          # Graph & model constants
+│   │   ├── enums/              # ModelPurpose enums
+│   │   ├── schemas/            # ModelProfile schemas
+│   │   ├── utils/              # Chat request & traced run name utils
+│   │   └── models.py           # Provider registry for chat models
+│   ├── voice2text/             # Speech-to-Text & Transcript Analysis
+│   │   ├── api/v2/             # Realtime WebSocket & Transcript API
+│   │   ├── graphs/             # LangGraph Feature Graphs
+│   │   │   └── transcript_analysis/ # Clean, punctuate, summarize, action items
+│   │   ├── schemas/            # Schemas for ASR & analysis
+│   │   └── services/           # Service layer
 │   ├── api/                    # API routes
 │   │   └── v1/
 │   │       └── routes.py
-│   ├── common/                 # Shared utilities
-│   │   ├── configs/            # Configuration settings
-│   │   ├── db/                 # Database setup
-│   │   ├── exceptions/         # Custom exceptions
-│   │   ├── i18n/               # Internationalization
-│   │   ├── logging/            # Logging setup
-│   │   ├── middleware/         # Middleware
-│   │   ├── models/             # Base models
-│   │   ├── schemas/            # Shared schemas
-│   │   └── utils/              # Utilities
+│   ├── common/                 # Shared utilities (db, i18n, configs, exceptions)
 │   ├── auth/                   # Authentication feature
-│   │   ├── api/
-│   │   ├── models/
-│   │   ├── repositories/
-│   │   ├── schemas/
-│   │   └── services/
 │   ├── users/                  # Users feature
-│   │   ├── api/
-│   │   ├── models/
-│   │   ├── repositories/
-│   │   ├── schemas/
-│   │   └── services/
 │   └── main.py
-├── migrations/                 # Alembic migrations
-├── tests/                      # Test files
+├── tests/                      # Unit tests (including test_agent_graphs.py)
 ├── docker-compose.yml
 ├── Dockerfile
 ├── pyproject.toml

@@ -16,8 +16,16 @@ forbidden:
   message: "アクセスが禁止されています"
 
 not_found:
-  code: "ERR.RES0101"
+  code: "ERR.SYS0103"
   message: "リソースが見つかりません"
+
+# =============================================================================
+# AGENT MODULE ERRORS
+# =============================================================================
+
+agent_model_request_failed:
+  code: "ERR.AGT0101"
+  message: "AIモデルへのリクエストに失敗しました。しばらくしてからもう一度お試しください。"
 
 user_not_found:
   code: "ERR.USR0101"

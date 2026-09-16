@@ -35,6 +35,14 @@ not_found:
   code: "ERR.SYS0103"
   message: "Resource not found"
 
+# =============================================================================
+# AGENT MODULE ERRORS
+# =============================================================================
+
+agent_model_request_failed:
+  code: "ERR.AGT0101"
+  message: "AI model service request failed. Please try again later."
+
 
 # =============================================================================
 # AUTH MODULE ERRORS

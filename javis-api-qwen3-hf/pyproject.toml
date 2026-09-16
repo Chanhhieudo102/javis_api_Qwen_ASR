@@ -35,6 +35,9 @@ torchaudio = "^2.4.0"
 accelerate = "^0.26.0"
 silero-vad = "^6.2.1"
 numpy = "^1.26.0"
+langgraph = ">=0.2.0"
+langchain-core = ">=0.3.0"
+langchain-openai = ">=0.2.0"
 
 [tool.poetry.group.dev.dependencies]
 ruff = "^0.8.0"
@@ -86,6 +89,7 @@ skip-magic-trailing-comma = false
 line-ending = "auto"
 
 [tool.pytest.ini_options]
+pythonpath = ["."]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_functions = ["test_*"]

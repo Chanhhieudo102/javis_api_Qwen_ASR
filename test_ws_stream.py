@@ -10,8 +10,10 @@ if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8")
     sys.stderr.reconfigure(encoding="utf-8")
 
+import os
+
 WS_URL = "wss://uydo8081--javis-api-qwen3-hf-serve-serve-dev.modal.run/api/v2/transcript/ws/no-diarization"
-AUDIO_PATH = "d:/VJ/encode/all_audio_input/media_148280_1767762915627.mp3"
+AUDIO_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "all_audio_input", "media_148280_1767762915627.mp3")
 
 async def test_stream():
     import soundfile as sf

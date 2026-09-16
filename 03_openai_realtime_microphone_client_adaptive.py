@@ -17,6 +17,8 @@ if sys.platform == "win32":
         sys.stderr.reconfigure(encoding='utf-8')
     except Exception:
         pass
+    # Sử dụng SelectorEventLoopPolicy trên Windows để tránh lỗi Proactor crash [WinError 10054] khi remote host ngắt kết nối
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 import gradio as gr
 import numpy as np
@@ -192,12 +194,21 @@ def start_websocket():
     """Start WebSocket connection in background thread."""
     global is_running
     is_running = True
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
         loop.run_until_complete(websocket_handler())
+    except (ConnectionResetError, websockets.exceptions.ConnectionClosed) as e:
+        logger.warning(f"Kết nối WebSocket bị ngắt: {e}")
     except Exception as e:
         logger.error(f"Thread Error: {e}")
+    finally:
+        try:
+            loop.close()
+        except Exception:
+            pass
 
 def start_recording():
     """Start audio recording and streaming session."""
@@ -374,23 +385,35 @@ import csv
 import glob
 from datetime import datetime
 
-GT_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "ground_truth")
-if not os.path.exists(GT_DIR):
-    GT_DIR = "data/ground_truth"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+GT_DIR = os.path.join(BASE_DIR, "ground_truth")
+AUDIO_DIR = os.path.join(BASE_DIR, "all_audio_input")
 
 def get_available_gt_files():
-    files = sorted(glob.glob(os.path.join(GT_DIR, "*.txt")))
-    return [os.path.basename(f) for f in files] or ["GT_01.txt"]
+    if not os.path.exists(GT_DIR):
+        return []
+    files = sorted([
+        os.path.basename(f)
+        for f in glob.glob(os.path.join(GT_DIR, "*.txt"))
+        if not os.path.basename(f).lower().startswith("readme")
+    ])
+    return files
 
-# Load JapaneseASREvaluator from 05_evaluate.py
-import importlib.util
+def get_available_audio_files():
+    if not os.path.exists(AUDIO_DIR):
+        return []
+    exts = ("*.mp3", "*.wav", "*.m4a", "*.flac", "*.ogg")
+    files = []
+    for ext in exts:
+        files.extend(glob.glob(os.path.join(AUDIO_DIR, ext)))
+    return sorted([os.path.basename(f) for f in files])
+
+# Load JapaneseASREvaluator from cer.py
 try:
-    eval_spec = importlib.util.spec_from_file_location("eval_module", os.path.join(os.path.dirname(__file__), "05_evaluate.py"))
-    eval_module = importlib.util.module_from_spec(eval_spec)
-    eval_spec.loader.exec_module(eval_module)
-    asr_evaluator = eval_module.JapaneseASREvaluator()
+    from cer import JapaneseASREvaluator
+    asr_evaluator = JapaneseASREvaluator()
 except Exception as e:
-    logger.error(f"Cannot load JapaneseASREvaluator: {e}")
+    logger.error(f"Cannot load JapaneseASREvaluator from cer.py: {e}")
     asr_evaluator = None
 
 def run_evaluation(current_transcript: str, selected_gt: str):
@@ -399,7 +422,7 @@ def run_evaluation(current_transcript: str, selected_gt: str):
         return "⚠️ **Chưa có nội dung transcript để đánh giá!**", "-", "-", "-"
     
     if asr_evaluator is None:
-        return "❌ Lỗi: Không khởi tạo được module đánh giá", "-", "-", "-"
+        return "❌ Lỗi: Không khởi tạo được module đánh giá cer.py", "-", "-", "-"
 
     gt_file_path = os.path.join(GT_DIR, selected_gt)
     if not os.path.exists(gt_file_path):
@@ -417,13 +440,14 @@ def run_evaluation(current_transcript: str, selected_gt: str):
         hyp_std = asr_evaluator.normalize_standard(current_transcript)
         hyp_loose = asr_evaluator.normalize_loose(current_transcript)
 
-        cer_strict = asr_evaluator._calc_cer(gt_strict, hyp_strict)
-        cer_std = asr_evaluator._calc_cer(gt_std, hyp_std)
-        cer_loose = asr_evaluator._calc_cer(gt_loose, hyp_loose)
+        cer_strict = asr_evaluator.calc_cer(gt_strict, hyp_strict)
+        cer_std = asr_evaluator.calc_cer(gt_std, hyp_std)
+        cer_loose = asr_evaluator.calc_cer(gt_loose, hyp_loose)
 
         # Save to history CSV & txt
-        csv_path = "data/predict_raw/cer_results.csv"
-        os.makedirs(os.path.dirname(csv_path), exist_ok=True)
+        results_dir = os.path.join(BASE_DIR, "results")
+        os.makedirs(results_dir, exist_ok=True)
+        csv_path = os.path.join(results_dir, "cer_results.csv")
         file_exists = os.path.exists(csv_path) and os.path.getsize(csv_path) > 0
         existing_run_count = 0
         if file_exists:
@@ -434,22 +458,19 @@ def run_evaluation(current_transcript: str, selected_gt: str):
         with open(csv_path, mode='a', newline='', encoding='utf-8-sig') as f:
             writer = csv.writer(f)
             if not file_exists:
-                writer.writerow(["Run", "GT File", "CER Strict", "CER Standard", "CER Loose", "CER Kana", "Transcript", "Timestamp"])
+                writer.writerow(["Run", "GT File", "CER Strict", "CER Standard", "CER Loose", "Accuracy Loose", "Transcript", "Timestamp"])
             writer.writerow([
                 existing_run_count + 1,
                 selected_gt,
-                f"{cer_strict:.4f}",
-                f"{cer_std:.4f}",
-                f"{cer_loose:.4f}",
-                f"{cer_loose:.4f}",
+                f"{cer_strict * 100:.2f}%",
+                f"{cer_std * 100:.2f}%",
+                f"{cer_loose * 100:.2f}%",
+                f"{max(0.0, (1.0 - cer_loose) * 100):.2f}%",
                 current_transcript.strip(),
                 timestamp_str
             ])
-            
-        with open("data/predict_raw/04_predict.txt", "w", encoding="utf-8") as f:
-            f.write(current_transcript)
 
-        status_msg = f"✅ **Đánh giá thành công với `{selected_gt}`** | Đã lưu kết quả vào `cer_results.csv`"
+        status_msg = f"✅ **Đánh giá thành công với `{selected_gt}`** | Độ chính xác (Loose): **{max(0.0, (1.0 - cer_loose) * 100):.2f}%** | Đã lưu vào `results/cer_results.csv`"
         return status_msg, f"{cer_strict * 100:.2f}%", f"{cer_std * 100:.2f}%", f"{cer_loose * 100:.2f}%"
     except Exception as e:
         logger.error(f"Error during evaluation: {e}")
@@ -459,6 +480,20 @@ def run_evaluation(current_transcript: str, selected_gt: str):
 # GIAO DIỆN GRADIO
 # ==========================================
 gt_choices = get_available_gt_files()
+audio_choices = get_available_audio_files()
+
+def select_audio_file(selected_audio: str):
+    if not selected_audio:
+        return None, gt_choices[0] if gt_choices else None
+    audio_path = os.path.join(AUDIO_DIR, selected_audio)
+    stem = os.path.splitext(selected_audio)[0]
+    matching_gt = f"{stem}.txt"
+    if matching_gt not in gt_choices:
+        matching_gt = gt_choices[0] if gt_choices else None
+    return audio_path, matching_gt
+
+default_audio = os.path.join(AUDIO_DIR, audio_choices[0]) if audio_choices else None
+default_gt = gt_choices[0] if gt_choices else None
 
 with gr.Blocks(title="Qwen3-ASR Real-time Speech Transcription") as demo:
     gr.Markdown("# 🎙️ Qwen3-ASR Real-time Speech Transcription")
@@ -473,8 +508,17 @@ with gr.Blocks(title="Qwen3-ASR Real-time Speech Transcription") as demo:
             audio_input = gr.Audio(sources=["microphone"], streaming=True, type="numpy", label="Microphone Stream")
 
         with gr.Tab("📁 Test nhanh bằng File Âm thanh (.wav, .mp3)"):
-            gr.Markdown("👉 Tải lên 1 file âm thanh để kiểm tra luồng stream lên Server mà không cần nói qua mic:")
-            file_input = gr.Audio(sources=["upload"], type="filepath", label="Chọn hoặc kéo thả file âm thanh")
+            gr.Markdown("👉 Bạn có thể chọn file có sẵn từ thư mục `all_audio_input` hoặc tải lên file tùy ý:")
+            with gr.Row():
+                audio_dropdown = gr.Dropdown(
+                    label="Chọn File Audio từ all_audio_input",
+                    choices=audio_choices,
+                    value=audio_choices[0] if audio_choices else None,
+                    interactive=True,
+                    scale=2
+                )
+                load_audio_btn = gr.Button("📂 Nạp File vào Trình phát", variant="secondary", scale=1)
+            file_input = gr.Audio(value=default_audio, sources=["upload"], type="filepath", label="Trình phát & Kéo thả file âm thanh")
             file_stream_btn = gr.Button("🚀 Bắt đầu Stream File lên Server", variant="primary")
             file_status = gr.Markdown("")
 
@@ -486,7 +530,7 @@ with gr.Blocks(title="Qwen3-ASR Real-time Speech Transcription") as demo:
             gt_dropdown = gr.Dropdown(
                 label="Chọn File Ground Truth (GT)",
                 choices=gt_choices,
-                value=gt_choices[0] if gt_choices else None,
+                value=default_gt,
                 interactive=True,
                 scale=2
             )
@@ -512,6 +556,8 @@ with gr.Blocks(title="Qwen3-ASR Real-time Speech Transcription") as demo:
     start_btn.click(start_recording, outputs=[start_btn, stop_btn, transcription_output])
     stop_btn.click(stop_recording, outputs=[start_btn, stop_btn, transcription_output])
     audio_input.stream(process_audio, inputs=[audio_input], outputs=[transcription_output])
+    audio_dropdown.change(fn=select_audio_file, inputs=[audio_dropdown], outputs=[file_input, gt_dropdown])
+    load_audio_btn.click(fn=select_audio_file, inputs=[audio_dropdown], outputs=[file_input, gt_dropdown])
     file_stream_btn.click(stream_file_test, inputs=[file_input], outputs=[file_status])
     copy_btn.click(
         fn=None,

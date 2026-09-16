@@ -28,8 +28,28 @@ image = (
         "onnxruntime",
         "librosa",
         "soundfile",
+        "langgraph>=0.2.0",
+        "langchain-core>=0.3.0",
+        "langchain-openai>=0.2.0",
     )
-    .add_local_dir(".", remote_path="/root")
+    .add_local_dir(
+        ".",
+        remote_path="/root",
+        ignore=[
+            ".venv",
+            "**/.venv",
+            ".git",
+            "**/__pycache__",
+            "client_logs.jsonl",
+            "*.pyc",
+            "all_audio_input",
+            "ground_truth",
+            ".pytest_cache",
+            "**/.pytest_cache",
+            ".ruff_cache",
+            "**/.ruff_cache",
+        ],
+    )
 )
 
 app = modal.App("javis-api-qwen3-hf-serve")
