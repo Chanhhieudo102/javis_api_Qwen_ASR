@@ -21,10 +21,86 @@ if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 import gradio as gr
+import gradio.processing_utils as gpu
 import numpy as np
 import os
 import pybase64 as base64
 import websockets
+
+# Tự động nạp ffmpeg từ imageio_ffmpeg vào PATH để hỗ trợ đọc mọi định dạng audio (.mp3, .wav, .m4a, .flac, .ogg, v.v.)
+try:
+    import imageio_ffmpeg
+    ffmpeg_bin_dir = os.path.dirname(imageio_ffmpeg.get_ffmpeg_exe())
+    if ffmpeg_bin_dir not in os.environ.get("PATH", ""):
+        os.environ["PATH"] = ffmpeg_bin_dir + os.pathsep + os.environ.get("PATH", "")
+except Exception:
+    pass
+
+def load_any_audio(file_path: str) -> np.ndarray:
+    """Load any audio format (.mp3, .wav, .m4a, .flac, .ogg, .aac, .webm, etc.) and convert to 16kHz mono float32."""
+    try:
+        import soundfile as sf
+        data, sr = sf.read(file_path)
+        audio_data = data.astype(np.float32)
+        if len(audio_data.shape) > 1:
+            audio_data = audio_data.mean(axis=1)
+
+        target_sr = 16000
+        if sr != target_sr:
+            num_target_samples = int(len(audio_data) * target_sr / sr)
+            audio_data = np.interp(
+                np.linspace(0, len(audio_data) - 1, num_target_samples),
+                np.arange(len(audio_data)),
+                audio_data
+            )
+        return np.clip(audio_data, -1.0, 1.0)
+    except Exception as sf_err:
+        import subprocess
+        try:
+            import imageio_ffmpeg
+            ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+            cmd = [
+                ffmpeg_exe, "-i", file_path,
+                "-f", "s16le", "-ac", "1", "-ar", "16000",
+                "-loglevel", "error", "-"
+            ]
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            out, _ = proc.communicate()
+            if proc.returncode == 0 and len(out) > 0:
+                audio_data = np.frombuffer(out, dtype=np.int16).astype(np.float32) / 32767.0
+                return np.clip(audio_data, -1.0, 1.0)
+        except Exception:
+            pass
+        raise RuntimeError(f"Không thể đọc file âm thanh {file_path}: {sf_err}")
+
+# Monkey-patch Gradio & pydub để hỗ trợ mọi định dạng audio và microphone streaming không bị crash do thiếu ffprobe trên Windows
+_orig_audio_is_playable = gpu.audio_is_playable
+def _safe_audio_is_playable(audio_filepath: str) -> bool:
+    try:
+        return _orig_audio_is_playable(audio_filepath)
+    except Exception:
+        suffix = os.path.splitext(str(audio_filepath))[1].lower()
+        return suffix in ('.mp3', '.wav', '.ogg', '.m4a', '.aac', '.flac', '.wma', '.webm')
+gpu.audio_is_playable = _safe_audio_is_playable
+
+_orig_audio_from_file = getattr(gpu, "audio_from_file", None)
+def _safe_audio_from_file(filename: str, crop_min: float = 0, crop_max: float = 100):
+    try:
+        data = load_any_audio(filename)
+        pcm16 = (data * 32767).astype(np.int16)
+        return 16000, pcm16
+    except Exception:
+        if _orig_audio_from_file is not None:
+            return _orig_audio_from_file(filename, crop_min, crop_max)
+        raise
+gpu.audio_from_file = _safe_audio_from_file
+
+try:
+    import pydub.utils
+    pydub.utils.get_prober_name = lambda: imageio_ffmpeg.get_ffmpeg_exe()
+    pydub.AudioSegment.converter = imageio_ffmpeg.get_ffmpeg_exe()
+except Exception:
+    pass
 
 try:
     from audio_enhancement_04 import get_pipeline, EnhancementPipeline
@@ -82,118 +158,188 @@ connection_status = "⚪ Sẵn sàng. Nhấn Start để bắt đầu."
 
 chosen_pipeline_strategy = "none"
 dsp_pipeline: Optional[EnhancementPipeline] = None
+transport_thread: Optional[threading.Thread] = None
+
+def wait_for_session_close(timeout=4.0):
+    """Ensure any previous WebSocket transport thread is completely stopped and closed."""
+    global transport_thread, is_running
+    is_running = False
+    if transport_thread is not None and transport_thread.is_alive():
+        logger.info("Đang chờ phiên WebSocket cũ đóng hoàn toàn...")
+        transport_thread.join(timeout=timeout)
+        if transport_thread.is_alive():
+            logger.warning("Phiên WebSocket cũ đóng quá thời gian chờ!")
+    transport_thread = None
+    time.sleep(0.3)
 
 async def websocket_handler():
     """Connect to WebSocket and handle audio streaming + transcription."""
-    global transcription_text, is_running, connection_status
+    global transcription_text, partial_text, is_running, connection_status
     
-    connection_status = "🟡 Đang kết nối tới server (chờ GPU nạp model)..."
-    logger.info(f"Đang kết nối WebSocket tới: {ws_url}")
-    
-    try:
-        async with websockets.connect(
-            ws_url, 
-            ping_interval=20, 
-            ping_timeout=20, 
-            open_timeout=120
-        ) as ws:
-            connection_status = "🟢 Đã kết nối WebSocket thành công! Đang lắng nghe âm thanh..."
-            logger.info("Kết nối WebSocket thành công!")
+    stop_event = asyncio.Event()
+    max_retries = 6
 
-            # 1. Handshake & Config
-            init_msg = await ws.recv()
-            logger.info(f"[RECV] Server Initial: {init_msg}")
-
-            logger.info(f"[SEND] Gửi cấu hình Model: {model}")
-            await ws.send(json.dumps({
-                "type": "session.update",
-                "model": model
-            }))
-
-            await ws.send(json.dumps({"type": "input_audio_buffer.commit"}))
-
-            async def send_audio():
-                chunk_count = 0
-                logger.info("[SEND] Bắt đầu luồng đẩy âm thanh liên tục...")
-                
-                while is_running or not audio_queue.empty():
-                    try:
-                        item = await asyncio.get_event_loop().run_in_executor(
-                            None, lambda: audio_queue.get(timeout=0.1)
-                        )
-                        if isinstance(item, tuple):
-                            chunk, is_silent = item
-                        else:
-                            chunk, is_silent = item, False
-
-                        await ws.send(
-                            json.dumps({"type": "input_audio_buffer.append", "audio": chunk})
-                        )
-                        chunk_count += 1
-                        
-                        if chunk_count % 50 == 0:
-                            logger.debug(f"[SEND] Đang đẩy audio... (Đã gửi {chunk_count} chunks)")
-
-                        # Sleep 0.005s = 4x Real-time
-                        await asyncio.sleep(0.005)
-                    except queue.Empty:
-                        continue
-                        
-                # Xử lý khi nhấn nút Stop và Queue đã được xả sạch
-                logger.info("Người dùng nhấn Stop và Buffer đã cạn. Gửi tín hiệu COMMIT (final=True) lên server...")
-                await ws.send(json.dumps({"type": "input_audio_buffer.commit", "final": True}))
-                
-                await asyncio.sleep(1.0) 
-                logger.info("[SEND] Luồng đẩy âm thanh đã đóng.")
-
-            async def receive_transcription():
-                global transcription_text, partial_text
-                logger.info("[RECV] Bắt đầu luồng lắng nghe kết quả từ Server...")
-                
-                try:
-                    async for message in ws:
-                        data = json.loads(message)
-                        msg_type = data.get("type", "unknown")
-
-                        if msg_type in ("transcription.partial", "partial"):
-                            partial_text = data.get("text", "")
-                            logger.info(f"[PARTIAL] {partial_text}")
-                            
-                        elif msg_type in ("transcription.done", "final"):
-                            # Handle both old 'text' field and new Soniox 'segments' array
-                            text = ""
-                            if msg_type == "final" and "segments" in data:
-                                text = " ".join([seg.get("text", "") for seg in data.get("segments", [])])
-                            else:
-                                text = data.get("text", "")
-                                
-                            if text:
-                                transcription_text += text + "\n"
-                                transcription_text = normalize_chouon(transcription_text)
-                            partial_text = ""
-                            logger.info(f"[DONE] Server chốt câu: {text}")
-                            
-                        elif msg_type == "error":
-                            logger.error(f"[ERROR] Lỗi từ Server: {data.get('error', data)}")
-                            
-                        else:
-                            logger.info(f"[EVENT] Type: {msg_type} | Data: {data}")
-                except websockets.exceptions.ConnectionClosed as e:
-                    logger.warning(f"[RECV] Server đóng kết nối WebSocket: {e}")
-
-            await asyncio.gather(send_audio(), receive_transcription())
-            
-    except Exception as e:
-        connection_status = f"🔴 Lỗi kết nối WebSocket: {e}"
-        logger.error(f"Bị lỗi ở WebSocket Handler: {e}", exc_info=True)
-    finally:
+    for attempt in range(max_retries):
         if not is_running:
-            connection_status = "⚪ Đã ngắt kết nối."
+            return
+
+        connection_status = f"🟡 Đang kết nối tới server (thử lần {attempt + 1}/{max_retries})..."
+        logger.info(f"Đang kết nối WebSocket tới: {ws_url} (lần {attempt + 1}/{max_retries})")
+
+        try:
+            async with websockets.connect(
+                ws_url, 
+                ping_interval=20, 
+                ping_timeout=20, 
+                open_timeout=30
+            ) as ws:
+                # 1. Handshake & Config
+                init_msg = await ws.recv()
+                logger.info(f"[RECV] Server Initial: {init_msg}")
+
+                try:
+                    init_data = json.loads(init_msg)
+                    if init_data.get("type") == "error" and init_data.get("code") == "WS_ERR_CAPACITY_FULL":
+                        if attempt < max_retries - 1:
+                            logger.warning(f"Server đang bận giải phóng phiên cũ (Capacity full). Đợi 1.0s và thử lại ({attempt + 1}/{max_retries})...")
+                            connection_status = f"🟡 Server đang bận giải phóng phiên cũ. Đợi thử lại ({attempt + 1}/{max_retries})..."
+                            await asyncio.sleep(1.0)
+                            continue
+                        else:
+                            connection_status = "🔴 Server đang bận phục vụ phiên khác (Capacity full)."
+                            return
+                except json.JSONDecodeError:
+                    pass
+
+                connection_status = "🟢 Đã kết nối WebSocket thành công! Đang lắng nghe âm thanh..."
+                logger.info("Kết nối WebSocket thành công!")
+
+                logger.info(f"[SEND] Gửi cấu hình Model: {model}")
+                await ws.send(json.dumps({
+                    "type": "session.update",
+                    "model": model
+                }))
+
+                await ws.send(json.dumps({"type": "input_audio_buffer.commit"}))
+
+                last_msg_time = time.time()
+
+                async def send_audio():
+                    nonlocal last_msg_time
+                    chunk_count = 0
+                    logger.info("[SEND] Bắt đầu luồng đẩy âm thanh liên tục...")
+                    
+                    while is_running or not audio_queue.empty():
+                        try:
+                            item = await asyncio.get_event_loop().run_in_executor(
+                                None, lambda: audio_queue.get(timeout=0.1)
+                            )
+                            if isinstance(item, tuple):
+                                chunk, is_silent = item
+                            else:
+                                chunk, is_silent = item, False
+
+                            await ws.send(
+                                json.dumps({"type": "input_audio_buffer.append", "audio": chunk})
+                            )
+                            chunk_count += 1
+                            
+                            if chunk_count % 50 == 0:
+                                logger.debug(f"[SEND] Đang đẩy audio... (Đã gửi {chunk_count} chunks)")
+
+                            await asyncio.sleep(0.005)
+                        except queue.Empty:
+                            continue
+                            
+                    logger.info("Phiên kết thúc hoặc Queue đã cạn. Gửi tín hiệu COMMIT (final=True) lên server...")
+                    try:
+                        await ws.send(json.dumps({"type": "input_audio_buffer.commit", "final": True}))
+                    except Exception as e:
+                        logger.warning(f"Không thể gửi commit: {e}")
+                    
+                    logger.info("Đang chờ server hoàn thành nhận diện toàn bộ các đoạn âm thanh...")
+                    while not stop_event.is_set():
+                        try:
+                            await asyncio.wait_for(stop_event.wait(), timeout=2.5)
+                            break
+                        except asyncio.TimeoutError:
+                            if time.time() - last_msg_time >= 4.0:
+                                logger.info("Server đã nhận diện xong toàn bộ các đoạn âm thanh (hết dữ liệu).")
+                                break
+
+                    logger.info("[SEND] Đóng phiên WebSocket sạch sẽ để giải phóng GPU cho lần chạy tiếp theo.")
+                    try:
+                        await ws.close()
+                    except Exception:
+                        pass
+                    logger.info("[SEND] Luồng đẩy âm thanh đã đóng.")
+
+                async def receive_transcription():
+                    nonlocal last_msg_time
+                    global transcription_text, partial_text, connection_status
+                    logger.info("[RECV] Bắt đầu luồng lắng nghe kết quả từ Server...")
+                    
+                    try:
+                        async for message in ws:
+                            last_msg_time = time.time()
+                            data = json.loads(message)
+                            msg_type = data.get("type", "unknown")
+
+                            if msg_type in ("transcription.partial", "partial"):
+                                partial_text = data.get("text", "")
+                                logger.info(f"[PARTIAL] {partial_text}")
+                                
+                            elif msg_type in ("transcription.done", "final"):
+                                text = ""
+                                if msg_type == "final" and "segments" in data:
+                                    text = " ".join([seg.get("text", "") for seg in data.get("segments", [])])
+                                else:
+                                    text = data.get("text", "")
+                                    
+                                if text:
+                                    transcription_text += text + "\n"
+                                    transcription_text = normalize_chouon(transcription_text)
+                                partial_text = ""
+                                logger.info(f"[DONE] Server chốt câu: {text}")
+                                
+                            elif msg_type == "error":
+                                logger.error(f"[ERROR] Lỗi từ Server: {data.get('error', data)}")
+                                stop_event.set()
+                            elif msg_type in ("session_stopped", "stopped"):
+                                logger.info("[EVENT] Server thông báo hoàn tất phiên.")
+                                stop_event.set()
+                    except (websockets.exceptions.ConnectionClosed, asyncio.CancelledError) as e:
+                        logger.info(f"[RECV] WebSocket đóng: {e}")
+                    except Exception as e:
+                        logger.error(f"[RECV] Lỗi nhận tin nhắn: {e}")
+
+                await asyncio.gather(send_audio(), receive_transcription(), return_exceptions=True)
+                break  # Phiên hoàn thành thành công
+
+        except websockets.exceptions.ConnectionClosed as cc:
+            if getattr(cc, 'code', None) == 1013 and attempt < max_retries - 1:
+                logger.warning(f"Server trả về code 1013 (Capacity Full). Đợi 1.0s và thử lại ({attempt + 1}/{max_retries})...")
+                connection_status = f"🟡 Server đang bận giải phóng phiên cũ, đợi thử lại ({attempt + 1}/{max_retries})..."
+                await asyncio.sleep(1.0)
+                continue
+            connection_status = f"🔴 Lỗi kết nối WebSocket: {cc}"
+            logger.error(f"WebSocket closed: {cc}")
+            break
+        except Exception as e:
+            if attempt < max_retries - 1 and is_running:
+                logger.warning(f"Lỗi kết nối ({e}), đang thử lại ({attempt + 1}/{max_retries})...")
+                await asyncio.sleep(1.0)
+                continue
+            connection_status = f"🔴 Lỗi kết nối WebSocket: {e}"
+            logger.error(f"Bị lỗi ở WebSocket Handler: {e}", exc_info=True)
+            break
+
+    is_running = False
+    if "🔴" not in connection_status:
+        connection_status = "⚪ Đã ngắt kết nối. Bấm Start hoặc chọn file để bắt đầu lại."
 
 def start_websocket():
     """Start WebSocket connection in background thread."""
-    global is_running
-    is_running = True
     if sys.platform == "win32":
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     loop = asyncio.new_event_loop()
@@ -212,7 +358,11 @@ def start_websocket():
 
 def start_recording():
     """Start audio recording and streaming session."""
-    global transcription_text, partial_text, dsp_pipeline, internal_audio_buffer, connection_status
+    global transcription_text, partial_text, dsp_pipeline, internal_audio_buffer, connection_status, is_running, transport_thread
+    
+    # Đảm bảo phiên cũ đã kết thúc và đóng kết nối hoàn toàn trước khi mở phiên mới
+    wait_for_session_close(timeout=4.0)
+
     logger.info("NÚT START ĐƯỢC NHẤN. Đang khởi tạo...")
     connection_status = "🟡 Đang kết nối tới server Modal..."
     
@@ -221,18 +371,26 @@ def start_recording():
     internal_audio_buffer = np.array([], dtype=np.float32)
 
     while not audio_queue.empty():
-        audio_queue.get()
+        try:
+            audio_queue.get_nowait()
+        except Exception:
+            break
         
     dsp_pipeline = get_pipeline(chosen_pipeline_strategy)
     logger.info(f"DSP Pipeline được chọn: {chosen_pipeline_strategy}")
     
-    thread = threading.Thread(target=start_websocket, daemon=True, name="WSTransportThread")
-    thread.start()
+    is_running = True
+    transport_thread = threading.Thread(target=start_websocket, daemon=True, name="WSTransportThread")
+    transport_thread.start()
     return gr.update(interactive=False), gr.update(interactive=True), ""
 
 def stop_recording():
     """Stop the transcription service and flush remaining buffer."""
     global is_running, internal_audio_buffer, dsp_pipeline, connection_status
+    if not is_running:
+        logger.info("stop_recording được gọi nhưng phiên chưa chạy hoặc đã dừng.")
+        return gr.update(interactive=True), gr.update(interactive=False), transcription_text
+
     logger.info("NÚT STOP ĐƯỢC NHẤN. Đang tiến hành xả (flush) buffer kẹt...")
     connection_status = "⏳ Đang xả buffer âm thanh và chờ kết quả từ server..."
 
@@ -251,7 +409,6 @@ def stop_recording():
             chunk_to_process = dsp_pipeline.run(chunk_to_process, sr=SAMPLE_RATE)
             chunk_to_process = np.clip(chunk_to_process, -1.0, 1.0)
 
-        # Bỏ qua nếu chunk rỗng
         if len(chunk_to_process) == 0:
             continue
 
@@ -275,8 +432,8 @@ def stop_recording():
     return gr.update(interactive=True), gr.update(interactive=False), transcription_text
 
 def process_audio(audio):
-    """Process incoming audio, apply DSP, and queue for streaming."""
-    global transcription_text, partial_text, dsp_pipeline, internal_audio_buffer
+    """Process incoming audio from microphone, apply DSP, and queue for streaming."""
+    global transcription_text, partial_text, dsp_pipeline, internal_audio_buffer, is_running
 
     if audio is None or not is_running:
         return transcription_text + ("\n⏳ Đang dịch: " + partial_text if partial_text else "")
@@ -290,7 +447,11 @@ def process_audio(audio):
     if audio_data.dtype == np.int16:
         audio_float = audio_data.astype(np.float32) / 32767.0
     else:
-        audio_float = audio_data.astype(np.float32)
+        max_abs = float(np.max(np.abs(audio_data))) if len(audio_data) > 0 else 0.0
+        if max_abs > 1.5:
+            audio_float = audio_data.astype(np.float32) / 32767.0
+        else:
+            audio_float = audio_data.astype(np.float32)
 
     # Resample về 16000Hz nếu cần
     if sample_rate != SAMPLE_RATE:
@@ -301,19 +462,22 @@ def process_audio(audio):
             audio_float,
         )
 
+    audio_float = np.clip(audio_float, -1.0, 1.0)
+
     # 1. BỎ TOÀN BỘ ÂM THANH MỚI VÀO "THÙNG CHỨA"
     internal_audio_buffer = np.concatenate((internal_audio_buffer, audio_float))
 
     # 2. RÚT TỪNG CHUNK ĐÚNG 320 MẪU (20ms) RA ĐỂ XỬ LÝ VÀ GỬI
+    chunks_sent = 0
     while len(internal_audio_buffer) >= TARGET_CHUNK_SAMPLES:
-        
         chunk_to_process = internal_audio_buffer[:TARGET_CHUNK_SAMPLES]
         internal_audio_buffer = internal_audio_buffer[TARGET_CHUNK_SAMPLES:]
 
         # 3. Chạy DSP trên chunk chuẩn 20ms
         if dsp_pipeline is not None:
             chunk_to_process = dsp_pipeline.run(chunk_to_process, sr=SAMPLE_RATE)
-            chunk_to_process = np.clip(chunk_to_process, -1.0, 1.0)
+            
+        chunk_to_process = np.clip(chunk_to_process, -1.0, 1.0)
 
         # Chặn mảng rỗng (khi LookaheadBuffer đang ngậm dữ liệu)
         if len(chunk_to_process) == 0:
@@ -326,57 +490,85 @@ def process_audio(audio):
         is_silent = bool(chunk_rms < 0.015)
         
         audio_queue.put((b64_chunk, is_silent))
+        chunks_sent += 1
 
     return transcription_text + ("\n⏳ Đang dịch: " + partial_text if partial_text else "")
 
-def stream_file_test(file_path):
+file_stream_cancel = threading.Event()
+
+def stream_file_test(file_input_val, audio_dropdown_val):
     """Stream an uploaded audio file directly through WebSocket to test ASR."""
-    global transcription_text, partial_text, is_running, connection_status
-    if not file_path:
-        return "⚠️ Vui lòng chọn hoặc kéo thả file âm thanh trước!"
+    global transcription_text, partial_text, is_running, connection_status, file_stream_cancel
+    
+    target_path = file_input_val
+    if not target_path and audio_dropdown_val:
+        target_path = os.path.join(AUDIO_DIR, audio_dropdown_val)
 
+    if not target_path or not os.path.exists(target_path):
+        return "⚠️ Vui lòng chọn hoặc nạp file âm thanh hợp lệ trước!"
+
+    file_name = os.path.basename(target_path)
+
+    # 1. Hủy bất kỳ worker stream nào đang chạy dở
+    file_stream_cancel.set()
+
+    # 2. Ngắt phiên kết nối cũ và đợi đóng hoàn toàn
+    stop_recording()
+    wait_for_session_close(timeout=4.0)
+
+    # 3. Đọc dữ liệu audio
     try:
-        import soundfile as sf
-        data, sr = sf.read(file_path)
-        audio_data = data.astype(np.float32)
-        if len(audio_data.shape) > 1:
-            audio_data = audio_data.mean(axis=1)
+        audio_data = load_any_audio(target_path)
+    except Exception as e:
+        logger.error(f"Lỗi khi đọc file {file_name}: {e}")
+        return f"❌ Lỗi đọc file {file_name}: {e}"
 
-        target_sr = 16000
-        if sr != target_sr:
-            num_target_samples = int(len(audio_data) * target_sr / sr)
-            audio_data = np.interp(
-                np.linspace(0, len(audio_data) - 1, num_target_samples),
-                np.arange(len(audio_data)),
-                audio_data
-            )
+    # 4. Khởi tạo phiên kết nối mới
+    start_recording()
 
-        start_recording()
+    # 5. Tạo cờ hủy riêng cho worker file hiện tại
+    current_cancel = threading.Event()
+    file_stream_cancel = current_cancel
 
-        def worker():
-            for _ in range(60):
-                if is_running and "🟢" in connection_status:
-                    break
-                time.sleep(0.1)
+    def worker():
+        # Chờ WebSocket kết nối thành công (tối đa 12s, hỗ trợ retry)
+        for _ in range(120):
+            if current_cancel.is_set():
+                logger.info(f"Hủy worker file `{file_name}` do có file mới được yêu cầu.")
+                return
+            if is_running and "🟢" in connection_status:
+                break
+            time.sleep(0.1)
 
-            pcm16 = (np.clip(audio_data, -1.0, 1.0) * 32767).astype(np.int16).tobytes()
-            chunk_size = 640
-            offset = 0
-            while offset < len(pcm16) and is_running:
-                chunk = pcm16[offset:offset + chunk_size]
-                b64_chunk = base64.b64encode(chunk).decode("utf-8")
-                audio_queue.put((b64_chunk, False))
-                offset += chunk_size
-                time.sleep(0.015)
-            
-            time.sleep(0.5)
+        if not is_running or "🟢" not in connection_status:
+            logger.error(f"Không thể kết nối WebSocket để stream file `{file_name}`.")
+            return
+
+        logger.info(f"Bắt đầu truyền stream file âm thanh `{file_name}` ({len(audio_data)/SAMPLE_RATE:.1f}s) lên server...")
+        pcm16 = (np.clip(audio_data, -1.0, 1.0) * 32767).astype(np.int16).tobytes()
+        chunk_size = 1600  # 50ms chunk (800 samples @ 16kHz)
+        offset = 0
+        while offset < len(pcm16) and is_running and not current_cancel.is_set():
+            chunk = pcm16[offset:offset + chunk_size]
+            b64_chunk = base64.b64encode(chunk).decode("utf-8")
+            audio_queue.put((b64_chunk, False))
+            offset += chunk_size
+            time.sleep(0.012)
+        
+        if current_cancel.is_set():
+            logger.info(f"Đã hủy stream `{file_name}` giữa chừng.")
+            return
+
+        logger.info(f"Đã nạp toàn bộ audio `{file_name}` vào hàng đợi. Đang chờ truyền hết lên server...")
+        while not audio_queue.empty() and is_running and not current_cancel.is_set():
+            time.sleep(0.05)
+
+        if not current_cancel.is_set():
+            logger.info(f"Đã truyền xong 100% audio `{file_name}` lên server. Đang chờ chốt kết quả...")
             stop_recording()
 
-        threading.Thread(target=worker, daemon=True, name="FileStreamWorker").start()
-        return "🚀 Đang truyền luồng âm thanh từ file lên server..."
-    except Exception as e:
-        logger.error(f"Lỗi khi đọc file: {e}")
-        return f"❌ Lỗi đọc file: {e}"
+    threading.Thread(target=worker, daemon=True, name="FileStreamWorker").start()
+    return f"🚀 Đang truyền luồng âm thanh từ file `{file_name}` ({len(audio_data)/SAMPLE_RATE:.1f}s) lên server..."
 
 # ==========================================
 # EVALUATION INTEGRATION
@@ -507,7 +699,7 @@ with gr.Blocks(title="Qwen3-ASR Real-time Speech Transcription") as demo:
                 stop_btn = gr.Button("⏹️ Stop (Dừng)", variant="stop", interactive=False)
             audio_input = gr.Audio(sources=["microphone"], streaming=True, type="numpy", label="Microphone Stream")
 
-        with gr.Tab("📁 Test nhanh bằng File Âm thanh (.wav, .mp3)"):
+        with gr.Tab("📁 Test nhanh bằng File Âm thanh (.mp3, .wav, .m4a, ...)"):
             gr.Markdown("👉 Bạn có thể chọn file có sẵn từ thư mục `all_audio_input` hoặc tải lên file tùy ý:")
             with gr.Row():
                 audio_dropdown = gr.Dropdown(
@@ -522,8 +714,17 @@ with gr.Blocks(title="Qwen3-ASR Real-time Speech Transcription") as demo:
             file_stream_btn = gr.Button("🚀 Bắt đầu Stream File lên Server", variant="primary")
             file_status = gr.Markdown("")
 
+    def clear_transcription():
+        """Clear all accumulated and partial transcription text."""
+        global transcription_text, partial_text
+        transcription_text = ""
+        partial_text = ""
+        return ""
+
     transcription_output = gr.Textbox(label="Kết quả Transcription (Streaming Real-time)", lines=6)
-    copy_btn = gr.Button("📋 Copy Transcription", variant="secondary")
+    with gr.Row():
+        copy_btn = gr.Button("📋 Copy Transcription", variant="secondary", scale=2)
+        clear_btn = gr.Button("🗑️ Xóa Transcription", variant="stop", scale=1)
 
     with gr.Accordion("🔍 Đánh Giá Độ Chính Xác (ASR CER Evaluation)", open=False):
         with gr.Row():
@@ -555,10 +756,11 @@ with gr.Blocks(title="Qwen3-ASR Real-time Speech Transcription") as demo:
 
     start_btn.click(start_recording, outputs=[start_btn, stop_btn, transcription_output])
     stop_btn.click(stop_recording, outputs=[start_btn, stop_btn, transcription_output])
+    clear_btn.click(clear_transcription, outputs=[transcription_output])
     audio_input.stream(process_audio, inputs=[audio_input], outputs=[transcription_output])
     audio_dropdown.change(fn=select_audio_file, inputs=[audio_dropdown], outputs=[file_input, gt_dropdown])
     load_audio_btn.click(fn=select_audio_file, inputs=[audio_dropdown], outputs=[file_input, gt_dropdown])
-    file_stream_btn.click(stream_file_test, inputs=[file_input], outputs=[file_status])
+    file_stream_btn.click(stream_file_test, inputs=[file_input, audio_dropdown], outputs=[file_status])
     copy_btn.click(
         fn=None,
         inputs=[transcription_output],
@@ -573,7 +775,7 @@ with gr.Blocks(title="Qwen3-ASR Real-time Speech Transcription") as demo:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Realtime WebSocket Transcription Client")
     parser.add_argument("--ws-url", type=str, default="", help="Direct WebSocket URL (e.g. wss://.../v1/realtime)")
-    parser.add_argument("--model", type=str, default="voxtral-realtime")
+    parser.add_argument("--model", type=str, default="qwen3")
     parser.add_argument("--host", type=str, default="localhost")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--share", action="store_true")
@@ -582,8 +784,8 @@ if __name__ == "__main__":
         "--pipeline",
         type=str,
         choices=["none", "qwen3", "qwen3_dsp", "voxtral_core", "voxtral_pro", "core", "ultra", "optimal", "ehanc_v1", "adaptive_v2", "adaptive_v3"],
-        default="voxtral_core",
-        help="Chọn DSP Pipeline để xử lý âm thanh (mặc định: voxtral_core, qwen3 cho Qwen3-ASR)"
+        default="none",
+        help="Chọn DSP Pipeline để xử lý âm thanh (mặc định: none cho Qwen3-ASR)"
     )
     
     args = parser.parse_args()

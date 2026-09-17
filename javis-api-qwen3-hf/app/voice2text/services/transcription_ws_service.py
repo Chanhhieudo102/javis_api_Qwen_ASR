@@ -7,6 +7,7 @@ from typing import Optional
 import numpy as np
 import torch
 from fastapi import WebSocket, WebSocketDisconnect
+from starlette.websockets import WebSocketState
 
 from app.common.logging import get_logger
 from app.voice2text.constants.config import (
@@ -40,12 +41,13 @@ class NoDiarizationStreamSession:
         
         self.audio_buffer = bytearray()
         self.vad_buffer = bytearray()
-        self.is_speaking = False
-        self.is_transcribing = False
-        self.last_transcribed_bytes = 0
-        self.segment_id = 1
-        self.next_segment_to_send = 1
-        self.accumulated_offset_ms = 0
+        
+        self.is_speaking: bool = False
+        self.is_transcribing: bool = False
+        self.last_transcribed_bytes: int = 0
+        self.accumulated_offset_ms: int = 0
+        self.segment_id: int = 1
+        self.next_segment_to_send: int = 1
         self.transcribe_tasks = []
         
         # Max segment ~ 29s
@@ -89,11 +91,12 @@ class NoDiarizationStreamSession:
                 self._flush_buffer()
                 if self.transcribe_tasks:
                     await asyncio.gather(*self.transcribe_tasks, return_exceptions=True)
-                await self._send_model(WsSessionStoppedResponse())
-                try:
-                    await self.websocket.close()
-                except Exception:
-                    pass
+                if self.websocket.client_state == WebSocketState.CONNECTED:
+                    await self._send_model(WsSessionStoppedResponse())
+                    try:
+                        await self.websocket.close()
+                    except Exception:
+                        pass
 
     async def _process_audio(self, pcm_chunk: bytes) -> None:
         """Process incoming raw PCM 16kHz 16-bit bytes."""
@@ -204,7 +207,13 @@ class NoDiarizationStreamSession:
                 pcm_chunk = base64.b64decode(b64_audio)
                 await self._process_audio(pcm_chunk)
         elif msg_type == "input_audio_buffer.commit":
+            is_final = msg.get("final", False)
             self._flush_buffer()
+            if is_final:
+                if self.transcribe_tasks:
+                    await asyncio.gather(*self.transcribe_tasks, return_exceptions=True)
+                if self.websocket.client_state == WebSocketState.CONNECTED:
+                    await self._send_model(WsSessionStoppedResponse())
         elif msg_type == "input_audio_buffer.clear":
             self.audio_buffer.clear()
             self.vad_buffer.clear()
