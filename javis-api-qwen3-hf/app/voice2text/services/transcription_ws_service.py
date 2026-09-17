@@ -15,6 +15,7 @@ from app.voice2text.constants.config import (
     MAX_CONCURRENT_SESSIONS,
     SAMPLES_PER_MS,
 )
+from app.voice2text.constants.dsp_constants import DSPConstants
 from app.voice2text.schemas.soniox_schemas import (
     SonioxSegment,
     WsFinalResponse,
@@ -24,6 +25,7 @@ from app.voice2text.schemas.soniox_schemas import (
     WsSessionStoppedResponse,
 )
 from app.voice2text.services.hf_engine import HFEngine
+from app.voice2text.services.japanese_itn_service import JapaneseITNService
 
 logger = get_logger(__name__)
 
@@ -100,9 +102,10 @@ class NoDiarizationStreamSession:
 
     async def _process_audio(self, pcm_chunk: bytes) -> None:
         """Process incoming raw PCM 16kHz 16-bit bytes."""
-        if not self.is_speaking and len(self.audio_buffer) >= 16000 * 2:
-            # Keep only the last 0.5s to provide context when speech starts
-            self.audio_buffer = self.audio_buffer[-(16000):]
+        preroll_bytes = int(16000 * 2 * DSPConstants.VAD_PREROLL_SEC)
+        if not self.is_speaking and len(self.audio_buffer) >= preroll_bytes:
+            # Keep VAD_PREROLL_SEC of audio context to avoid swallowing sentence-initial sounds
+            self.audio_buffer = self.audio_buffer[-preroll_bytes:]
 
         self.audio_buffer.extend(pcm_chunk)
         self.vad_buffer.extend(pcm_chunk)
@@ -145,12 +148,19 @@ class NoDiarizationStreamSession:
             self.is_transcribing = False
 
     def _flush_buffer(self):
+        # Tránh dịch đoạn silence đuôi khi người dùng đã dừng nói để loại bỏ triệt để ảo giác (hallucination)
         if len(self.audio_buffer) > 0:
             buf = bytes(self.audio_buffer)
-            current_seg = self.segment_id
-            self.segment_id += 1
-            task = asyncio.create_task(self._transcribe_buffer(buf, is_final=True, target_segment_id=current_seg))
-            self.transcribe_tasks.append(task)
+            arr = np.frombuffer(buf, dtype=np.int16).astype(np.float32) / 32768.0
+            rms = float(np.sqrt(np.mean(arr ** 2))) if len(arr) > 0 else 0.0
+            # Chỉ phiên âm nếu đang có tiếng nói (is_speaking) HOẶC có năng lượng giọng nói thực tế (RMS >= -42 dBFS = 0.008)
+            if self.is_speaking or (rms >= 0.008 and len(self.audio_buffer) >= 16000 * 2 * 0.5):
+                current_seg = self.segment_id
+                self.segment_id += 1
+                task = asyncio.create_task(self._transcribe_buffer(buf, is_final=True, target_segment_id=current_seg))
+                self.transcribe_tasks.append(task)
+            else:
+                logger.debug(f"[VAD] Dropped silence/noise tail: {len(buf)/(16000*2):.2f}s, RMS={rms:.4f}")
             
         self.audio_buffer.clear()
         self.is_speaking = False
@@ -160,6 +170,8 @@ class NoDiarizationStreamSession:
     async def _transcribe_buffer(self, pcm_bytes: bytes, is_final: bool = False, target_segment_id: int = 0):
         # Run inference in a background thread to unblock event loop
         text = await asyncio.to_thread(self.engine.generate_text, pcm_bytes)
+        if text:
+            text = JapaneseITNService.normalize(text)
         
         duration_ms = int(len(pcm_bytes) / 2 / SAMPLES_PER_MS)
 
@@ -236,6 +248,7 @@ class NoDiarizationStreamSession:
             await self.websocket.send_text(model.model_dump_json(exclude_none=True))
         except Exception:
             self._running = False
+
 
     async def _send_json(self, obj: dict) -> None:
         """Send a raw dict as JSON text."""

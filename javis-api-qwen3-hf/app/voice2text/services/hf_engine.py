@@ -4,12 +4,15 @@ import os
 import re
 import tempfile
 import wave
+from typing import Optional
 
 import torch
 from transformers import AutoModelForMultimodalLM, AutoProcessor
 
 from app.common.logging import get_logger
 from app.voice2text.constants.config import MODEL_NAME
+from app.voice2text.constants.dsp_constants import DSPConstants
+
 
 logger = get_logger(__name__)
 
@@ -83,8 +86,8 @@ class HFEngine:
         except Exception as e:
             logger.error(f"[INIT] Warmup failed: {e}")
 
-    def create_vad_iterator(self, threshold: float = 0.3, min_silence_duration_ms: int = 1000):
-        """Create a new VAD iterator instance for a session."""
+    def create_vad_iterator(self, threshold: float = DSPConstants.VAD_THRESHOLD, min_silence_duration_ms: int = DSPConstants.VAD_MIN_SILENCE_MS):
+        """Create a new VAD iterator instance for a session (params from DSPConstants)."""
         return self.VADIteratorClass(self.silero_model, threshold=threshold, min_silence_duration_ms=min_silence_duration_ms)
 
     def generate_text(self, pcm_bytes: bytes, language: str = "Japanese") -> str:
@@ -119,7 +122,8 @@ class HFEngine:
                     max_new_tokens=256,
                     do_sample=False,
                     num_beams=1,
-                    repetition_penalty=1.02,
+                    repetition_penalty=1.0,
+                    no_repeat_ngram_size=3,
                     pad_token_id=self.processor.tokenizer.pad_token_id,
                     eos_token_id=self.processor.tokenizer.eos_token_id,
                 )
@@ -128,16 +132,96 @@ class HFEngine:
             generated_ids = output_ids[:, prompt_len:] if output_ids.shape[1] > prompt_len else output_ids
             
             try:
-                clean_text = self.processor.decode(generated_ids, return_format="transcription_only")[0]
-                return clean_text.strip()
+                raw = self.processor.decode(generated_ids, return_format="transcription_only")[0]
+                return self._postprocess(raw.strip())
             except TypeError:
                 raw_text = self.processor.decode(generated_ids[0], skip_special_tokens=True)
-                clean_text = re.sub(r"^.*?<asr_text>\s*", "", raw_text, flags=re.DOTALL)
-                clean_text = re.sub(r"^language\s+[A-Za-z0-9_]+\s*", "", clean_text)
-                return clean_text.strip()
+                raw_text = re.sub(r"^.*?<asr_text>\s*", "", raw_text, flags=re.DOTALL)
+                raw_text = re.sub(r"^language\s+[A-Za-z0-9_]+\s*", "", raw_text)
+                return self._postprocess(raw_text.strip())
         except Exception as e:
             logger.error(f"[ASR Error] {e}")
             return ""
         finally:
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
+
+    # -----------------------------------------------------------------------
+    # Post-processing: Remove hallucination tails
+    # -----------------------------------------------------------------------
+    # Qwen3-ASR sometimes appends off-topic prose after the real speech ends,
+    # especially when the audio tail contains silence.  We detect common
+    # hallucination markers (narrative starters, ellipsis-like patterns) and
+    # truncate the output at the first such occurrence.
+    # Patterns are kept general – no hard-coded transcription content.
+    _HALLUCINATION_PATTERNS = re.compile(
+        r"("
+        # Narrative / story starters (Japanese)
+        r"この(作品|物語|小説|映画|番組|曲|歌|本|記事|内容|テキスト|サービス|システム|ページ|サイト)"
+        r"|以下は.{0,10}(です|ます|である)"
+        r"|次の.{0,10}(文章|テキスト|内容|会話|音声)"
+        r"|訳文[:：]"
+        r"|字幕[:：]"
+        # Off-topic personal narrative starters (Qwen often generates これ/あの after silence)
+        r"|その時[、,]?(私|俺|僕|彼|彼女|我々)"
+        r"|そして[、,]?(私|俺|僕|彼|彼女)は"
+        # Instruction/translation artifacts
+        r"|^(翻訳|要約|まとめ|解説)[：:]"
+        # Broken/repeated character artifacts (4+ repeated chars)
+        r"|(.)(\4{4,})"
+        # English narrative starters that sometimes appear
+        r"|The following is"
+        r"|In this (video|audio|recording|episode)"
+        r")",
+        re.UNICODE | re.MULTILINE,
+    )
+
+    # Regex to split text into sentences for repeat detection
+    _SENTENCE_SPLIT = re.compile(r'(?<=[。！？\n])\s*')
+
+    def _remove_hallucination_tail(self, text: str) -> str:
+        """Strip hallucinated prose appended after real speech."""
+        if not text:
+            return text
+        m = self._HALLUCINATION_PATTERNS.search(text)
+        if m:
+            truncated = text[:m.start()].rstrip("。、!！?？\n ")
+            logger.debug(
+                f"[Hallucination] Stripped tail at pos {m.start()}: ...{text[max(0,m.start()-20):m.start()]!r}"
+                f" | removed: {text[m.start():m.start()+40]!r}"
+            )
+            return truncated
+        return text
+
+    def _remove_consecutive_repeats(self, text: str) -> str:
+        """Remove consecutively repeated short sentences/utterances from output.
+
+        Qwen sometimes repeats the same short phrase 2-3 times in a row when the
+        audio contains repeated filler words or when the segment boundary lands on
+        a pause. This does NOT remove legitimate content – only identical adjacent
+        sentences whose combined length is under 20 characters each.
+        """
+        if not text:
+            return text
+        # Split on sentence-ending punctuation, keeping the delimiter
+        parts = self._SENTENCE_SPLIT.split(text)
+        deduped = []
+        prev = None
+        for part in parts:
+            stripped = part.strip()
+            if not stripped:
+                continue
+            # Only deduplicate very short phrases (≤20 chars) to avoid
+            # accidentally removing legitimate repeated content in conversation
+            if stripped == prev and len(stripped) <= 20:
+                logger.debug(f"[RepeatRemoval] Dropped duplicate: {stripped!r}")
+                continue
+            deduped.append(part)
+            prev = stripped
+        return "".join(deduped)
+
+    def _postprocess(self, text: str) -> str:
+        """Full post-processing pipeline: hallucination removal then deduplication."""
+        text = self._remove_hallucination_tail(text)
+        text = self._remove_consecutive_repeats(text)
+        return text.strip()
