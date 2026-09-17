@@ -56,7 +56,6 @@ class NoDiarizationStreamSession:
 
     async def handle(self) -> None:
         """Full lifecycle: accept -> ready -> stream -> session_stopped -> close."""
-        acquired = _session_semaphore.locked()
         if _session_semaphore._value <= 0:
             await self.websocket.accept()
             await self._send_json(

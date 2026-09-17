@@ -13,8 +13,8 @@ def build_summarize_prompt(cleaned_transcript: str, language: str) -> str:
 
 
 def parse_summary_and_actions(raw_output: str) -> tuple[str, list[str]]:
-    """
-    Parse model output expecting JSON with 'summary' and 'action_items'.
+    """Parse model output expecting JSON with 'summary' and 'action_items'.
+
     Falls back gracefully if response has markdown blocks or plain text.
     """
     clean_json = raw_output.strip()

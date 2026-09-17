@@ -17,10 +17,7 @@ logger = get_logger(__name__)
 
 
 class RunnableChatModel:
-    """
-    Wraps a primary ChatModel with optional fallbacks,
-    failover warning logging, and failure boundary error conversion.
-    """
+    """ChatModel wrapper supporting fallbacks, failover logging, and error conversion."""
 
     def __init__(
         self,
@@ -28,6 +25,7 @@ class RunnableChatModel:
         primary_model: Runnable,
         fallback_model: Runnable | None = None,
     ) -> None:
+        """Initialize RunnableChatModel with profile, primary, and optional fallback model."""
         self.profile = profile
         self.primary_model = primary_model
         self.fallback_model = fallback_model
@@ -43,9 +41,7 @@ class RunnableChatModel:
         config: RunnableConfig | None = None,
         **kwargs: Any,
     ) -> BaseMessage:
-        """
-        Invoke the underlying model chain with failover tracking and failure boundary.
-        """
+        """Invoke the underlying model chain with failover tracking and failure boundary."""
         try:
             reply = await self.runnable.ainvoke(input, config=config, **kwargs)
         except Exception as exc:

@@ -8,8 +8,8 @@ from app.common.configs import settings
 
 
 def traced_run_name(name: str, run_id: str | None = None) -> str:
-    """
-    Build a unique run_name for LangSmith tracing: <name>_<run_id>_<UTC_timestamp>.
+    """Build a unique run_name for LangSmith tracing: <name>_<run_id>_<UTC_timestamp>.
+
     e.g. transcript_analysis_6d662627-5021-42d0-991b-e4bc9b09c1fe_20260826T045627Z
     """
     rid = run_id or str(uuid.uuid4())
@@ -24,9 +24,7 @@ def run_config(
     metadata: dict[str, Any] | None = None,
     context: dict[str, Any] | None = None,
 ) -> RunnableConfig:
-    """
-    Build LangGraph RunnableConfig with run_name, environment tags, caller metadata, and configurable context.
-    """
+    """Build LangGraph RunnableConfig with run_name, environment tags, caller metadata, and context."""
     env_name = getattr(settings, "app_env", "dev")
     config: RunnableConfig = {
         "configurable": context or {},
@@ -37,9 +35,3 @@ def run_config(
     return config
 
 
-def run_value(config: RunnableConfig | None, key: str, default: Any = None) -> Any:
-    """Retrieve a static caller value from config['configurable']."""
-    if not config:
-        return default
-    configurable = config.get("configurable", {})
-    return configurable.get(key, default)

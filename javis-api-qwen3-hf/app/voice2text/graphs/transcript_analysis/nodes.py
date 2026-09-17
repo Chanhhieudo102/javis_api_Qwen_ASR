@@ -1,6 +1,6 @@
 from langchain_core.runnables import RunnableConfig
 
-from app.agent.clients.chat_model import ChatModel
+from app.agent.nodes import BaseChatNode
 from app.agent.utils.chat_request import build_chat_messages
 from app.voice2text.graphs.transcript_analysis.helpers import (
     build_punctuate_prompt,
@@ -10,14 +10,11 @@ from app.voice2text.graphs.transcript_analysis.helpers import (
 from app.voice2text.graphs.transcript_analysis.state import TranscriptAnalysisState
 
 
-class TranscriptAnalysisCleanPunctuateNode:
+class TranscriptAnalysisCleanPunctuateNode(BaseChatNode):
     """Class node that cleans, punctuates, and normalizes raw ASR transcript."""
 
-    def __init__(self, model: ChatModel, system_prompt: str) -> None:
-        self.model = model
-        self.system_prompt = system_prompt
-
     async def work(self, state: TranscriptAnalysisState, config: RunnableConfig) -> dict:
+        """Clean and punctuate raw transcript text using ChatModel."""
         user_prompt = build_punctuate_prompt(
             raw_transcript=state["raw_transcript"],
             language=state.get("language", "Japanese"),
@@ -31,14 +28,11 @@ class TranscriptAnalysisCleanPunctuateNode:
         return {"cleaned_transcript": cleaned_text.strip()}
 
 
-class TranscriptAnalysisSummarizeNode:
+class TranscriptAnalysisSummarizeNode(BaseChatNode):
     """Class node that summarizes conversation and extracts action items."""
 
-    def __init__(self, model: ChatModel, system_prompt: str) -> None:
-        self.model = model
-        self.system_prompt = system_prompt
-
     async def work(self, state: TranscriptAnalysisState, config: RunnableConfig) -> dict:
+        """Summarize conversation and extract action items from cleaned transcript."""
         user_prompt = build_summarize_prompt(
             cleaned_transcript=state.get("cleaned_transcript", state["raw_transcript"]),
             language=state.get("language", "Japanese"),

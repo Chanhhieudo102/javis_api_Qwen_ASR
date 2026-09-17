@@ -21,7 +21,7 @@ from app.voice2text.graphs.transcript_analysis.state import TranscriptAnalysisIn
 
 
 def fake_model(*reply_contents: str, model_name: str = "primary-model") -> GenericFakeChatModel:
-    """Helper to build a fake chat model returning specific messages in sequence."""
+    """Build a fake chat model returning specific messages in sequence."""
     msgs = [
         AIMessage(
             content=c,
@@ -33,7 +33,7 @@ def fake_model(*reply_contents: str, model_name: str = "primary-model") -> Gener
 
 
 def failing_model(error_msg: str = "Network timeout") -> RunnableLambda:
-    """Helper that always raises an exception when invoked."""
+    """Raise an exception when invoked."""
     def _raise(*args, **kwargs):
         raise RuntimeError(error_msg)
     return RunnableLambda(_raise)
@@ -55,6 +55,25 @@ async def test_failover_when_primary_fails():
 
     assert result.content == "Fallback reply content"
     assert result.response_metadata[MODEL_NAME_METADATA_KEY] == "gpt-fallback"
+
+
+@pytest.mark.asyncio
+async def test_without_a_fallback_the_error_still_raises():
+    """2. When no fallback is configured, primary failure raises typed error."""
+    profile = ModelProfile(
+        purpose=ModelPurpose.TRANSCRIPT_ANALYSIS,
+        primary_model="gpt-primary",
+        fallback_model=None,
+    )
+    primary = failing_model("Primary crashed without fallback")
+
+    chat_model = RunnableChatModel(profile=profile, primary_model=primary, fallback_model=None)
+
+    with pytest.raises(InternalServerException) as exc_info:
+        await chat_model.ainvoke("Test input")
+
+    assert exc_info.value.detail == ErrorConstants.Agent.MODEL_REQUEST_FAILED
+    assert exc_info.value.__cause__ is not None
 
 
 @pytest.mark.asyncio
