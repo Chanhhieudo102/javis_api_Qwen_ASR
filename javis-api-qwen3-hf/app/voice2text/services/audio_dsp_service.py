@@ -301,16 +301,9 @@ class AudioDSPService:
 
         mode_str = str(mode).lower()
         if mode_str in ("meeting", AudioDSPMode.MEETING.value):
-            compressed = cls.smooth_compressor(
-                resampled,
-                sample_rate=DSPConstants.TARGET_SAMPLE_RATE,
-                threshold_db=DSPConstants.COMP_THRESHOLD_DB,
-                ratio=DSPConstants.COMP_RATIO,
-                attack_ms=DSPConstants.COMP_ATTACK_MS,
-                release_ms=DSPConstants.COMP_RELEASE_MS,
-                makeup_gain_db=DSPConstants.COMP_MAKEUP_GAIN_DB,
-            )
-            processed = cls.adaptive_rms_agc(compressed, sr=DSPConstants.TARGET_SAMPLE_RATE)
+            # Encode folder uses only adaptive_rms_agc for meeting mode (no compressor)
+            processed = cls.adaptive_rms_agc(resampled, sr=DSPConstants.TARGET_SAMPLE_RATE)
+
         elif mode_str in ("ideal", AudioDSPMode.IDEAL.value):
             processed = cls.peak_normalize(resampled, target_db=DSPConstants.PEAK_TARGET_DBFS)
         else:

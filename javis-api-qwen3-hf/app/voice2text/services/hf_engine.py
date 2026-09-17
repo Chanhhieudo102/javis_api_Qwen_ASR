@@ -101,8 +101,8 @@ class HFEngine:
             wf.setsampwidth(2)
             wf.setframerate(16000)
             
-            # Audio Padding: Thêm 300ms khoảng lặng vào đầu và cuối để khắc phục CNN Edge Effects
-            padding_bytes = b'\x00' * int(16000 * 2 * 0.3)
+            # Audio Padding: 150ms head/tail để khắc phục CNN Edge Effects (giảm từ 300ms để bớt hallucination)
+            padding_bytes = b'\x00' * int(16000 * 2 * 0.15)
             padded_pcm_bytes = padding_bytes + pcm_bytes + padding_bytes
             wf.writeframes(padded_pcm_bytes)
 
@@ -119,7 +119,7 @@ class HFEngine:
             with torch.no_grad():
                 output_ids = self.model.generate(
                     **inputs,
-                    max_new_tokens=256,
+                    max_new_tokens=384,
                     do_sample=False,
                     num_beams=1,
                     repetition_penalty=1.0,
@@ -162,14 +162,19 @@ class HFEngine:
         r"|次の.{0,10}(文章|テキスト|内容|会話|音声)"
         r"|訳文[:：]"
         r"|字幕[:：]"
-        # Off-topic personal narrative starters (Qwen often generates これ/あの after silence)
+        # Generic connective prose Qwen generates after silence
+        r"|このように(して)?[、。]"
+        r"|このため[、。]"
+        r"|したがって[、。]"
+        r"|なお[、。].{0,5}(です|ます|でした|ました)"
+        # Off-topic personal narrative starters
         r"|その時[、,]?(私|俺|僕|彼|彼女|我々)"
         r"|そして[、,]?(私|俺|僕|彼|彼女)は"
         # Instruction/translation artifacts
         r"|^(翻訳|要約|まとめ|解説)[：:]"
         # Broken/repeated character artifacts (4+ repeated chars)
-        r"|(.)(\4{4,})"
-        # English narrative starters that sometimes appear
+        r"|(.)(\5{4,})"
+        # English narrative starters
         r"|The following is"
         r"|In this (video|audio|recording|episode)"
         r")",
@@ -211,9 +216,9 @@ class HFEngine:
             stripped = part.strip()
             if not stripped:
                 continue
-            # Only deduplicate very short phrases (≤20 chars) to avoid
+            # Only deduplicate short phrases (<=30 chars) to avoid
             # accidentally removing legitimate repeated content in conversation
-            if stripped == prev and len(stripped) <= 20:
+            if stripped == prev and len(stripped) <= 30:
                 logger.debug(f"[RepeatRemoval] Dropped duplicate: {stripped!r}")
                 continue
             deduped.append(part)
