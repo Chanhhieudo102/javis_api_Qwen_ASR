@@ -18,13 +18,16 @@ logger = get_logger(__name__)
 
 
 class HFEngine:
-    """
-    Singleton for HuggingFace Transformers logic (Qwen3-ASR).
+    """Singleton for HuggingFace Transformers logic (Qwen3-ASR).
+
     This mimics the logic from 03_09_02_modal_qwen3_serve.py but integrated via Clean Architecture.
     """
 
     _instance = None
     _lock = asyncio.Lock()
+
+    # Audio padding constants
+    LEADING_PADDING_SEC: float = 0.20
 
     def __init__(self):
         if HFEngine._instance is not None:
@@ -98,13 +101,17 @@ class HFEngine:
         wav_io = io.BytesIO()
         with wave.open(wav_io, 'wb') as wf:
             wf.setnchannels(1)
-            wf.setsampwidth(2)
-            wf.setframerate(16000)
+            wf.setsampwidth(DSPConstants.BYTES_PER_SAMPLE)
+            wf.setframerate(DSPConstants.TARGET_SAMPLE_RATE)
             
-            # Audio Padding: 150ms head/tail để khắc phục CNN Edge Effects (giảm từ 300ms để bớt hallucination)
-            padding_bytes = b'\x00' * int(16000 * 2 * 0.15)
-            padded_pcm_bytes = padding_bytes + pcm_bytes + padding_bytes
-            wf.writeframes(padded_pcm_bytes)
+            # Leading silence protects onset phonemes against CNN filter edge effects;
+            # no trailing padding ensures the model stops cleanly without hallucination
+            padding_bytes_count = int(
+                DSPConstants.TARGET_SAMPLE_RATE * DSPConstants.BYTES_PER_SAMPLE * self.LEADING_PADDING_SEC
+            )
+            leading_padding = b'\x00' * padding_bytes_count
+            wf.writeframes(leading_padding + pcm_bytes)
+
 
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
             tmp.write(wav_io.getvalue())
@@ -122,11 +129,11 @@ class HFEngine:
                     max_new_tokens=384,
                     do_sample=False,
                     num_beams=1,
-                    repetition_penalty=1.0,
-                    no_repeat_ngram_size=3,
+                    repetition_penalty=1.02,
                     pad_token_id=self.processor.tokenizer.pad_token_id,
                     eos_token_id=self.processor.tokenizer.eos_token_id,
                 )
+
 
             prompt_len = inputs["input_ids"].shape[1]
             generated_ids = output_ids[:, prompt_len:] if output_ids.shape[1] > prompt_len else output_ids
@@ -155,28 +162,28 @@ class HFEngine:
     # truncate the output at the first such occurrence.
     # Patterns are kept general – no hard-coded transcription content.
     _HALLUCINATION_PATTERNS = re.compile(
-        r"("
+        r"(?:"
         # Narrative / story starters (Japanese)
-        r"この(作品|物語|小説|映画|番組|曲|歌|本|記事|内容|テキスト|サービス|システム|ページ|サイト)"
-        r"|以下は.{0,10}(です|ます|である)"
-        r"|次の.{0,10}(文章|テキスト|内容|会話|音声)"
+        r"この(?:作品|物語|小説|映画|番組|曲|歌|本|記事|内容|テキスト|サービス|システム|ページ|サイト)"
+        r"|以下は.{0,10}(?:です|ます|である)"
+        r"|次の.{0,10}(?:文章|テキスト|内容|会話|音声)"
         r"|訳文[:：]"
         r"|字幕[:：]"
         # Generic connective prose Qwen generates after silence
-        r"|このように(して)?[、。]"
+        r"|このように(?:して)?[、。]"
         r"|このため[、。]"
         r"|したがって[、。]"
-        r"|なお[、。].{0,5}(です|ます|でした|ました)"
+        r"|なお[、。].{0,5}(?:です|ます|でした|ました)"
         # Off-topic personal narrative starters
-        r"|その時[、,]?(私|俺|僕|彼|彼女|我々)"
-        r"|そして[、,]?(私|俺|僕|彼|彼女)は"
+        r"|その時[、,]?(?:私|俺|僕|彼|彼女|我々)"
+        r"|そして[、,]?(?:私|俺|僕|彼|彼女)は"
         # Instruction/translation artifacts
-        r"|^(翻訳|要約|まとめ|解説)[：:]"
+        r"|^(?:翻訳|要約|まとめ|解説)[：:]"
         # Broken/repeated character artifacts (4+ repeated chars)
-        r"|(.)(\5{4,})"
+        r"|(?P<rep_char>.)(?P=rep_char){4,}"
         # English narrative starters
         r"|The following is"
-        r"|In this (video|audio|recording|episode)"
+        r"|In this (?:video|audio|recording|episode)"
         r")",
         re.UNICODE | re.MULTILINE,
     )
@@ -199,12 +206,11 @@ class HFEngine:
         return text
 
     def _remove_consecutive_repeats(self, text: str) -> str:
-        """Remove consecutively repeated short sentences/utterances from output.
+        """Remove model hallucination loops where a phrase repeats 3+ times in a row.
 
-        Qwen sometimes repeats the same short phrase 2-3 times in a row when the
-        audio contains repeated filler words or when the segment boundary lands on
-        a pause. This does NOT remove legitimate content – only identical adjacent
-        sentences whose combined length is under 20 characters each.
+        Preserves legitimate 2-turn conversational exchanges (e.g. both speakers saying
+        'お世話になります。' or '失礼いたします。') while safely dropping unnatural 3+
+        consecutive repetitions generated during audio pauses.
         """
         if not text:
             return text
@@ -212,18 +218,22 @@ class HFEngine:
         parts = self._SENTENCE_SPLIT.split(text)
         deduped = []
         prev = None
+        repeat_count = 0
         for part in parts:
             stripped = part.strip()
             if not stripped:
                 continue
-            # Only deduplicate short phrases (<=30 chars) to avoid
-            # accidentally removing legitimate repeated content in conversation
-            if stripped == prev and len(stripped) <= 30:
-                logger.debug(f"[RepeatRemoval] Dropped duplicate: {stripped!r}")
-                continue
+            if stripped == prev:
+                repeat_count += 1
+                if repeat_count >= 2:  # Already present twice; 3rd+ is a repetition loop
+                    logger.debug(f"[RepeatRemoval] Dropped 3+ repeat: {stripped!r}")
+                    continue
+            else:
+                prev = stripped
+                repeat_count = 0
             deduped.append(part)
-            prev = stripped
         return "".join(deduped)
+
 
     def _postprocess(self, text: str) -> str:
         """Full post-processing pipeline: hallucination removal then deduplication."""

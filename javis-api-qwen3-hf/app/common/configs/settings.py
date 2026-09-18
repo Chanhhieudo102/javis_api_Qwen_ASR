@@ -3,7 +3,7 @@
 import os
 from pathlib import Path
 
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BASE_DIR = Path(__file__).resolve().parents[3]
 RESOURCE_DIR = Path(__file__).resolve().parents[1] / "resources"
@@ -33,12 +33,11 @@ class Settings(BaseSettings):
     error_dir: str = str(RESOURCE_DIR / "errors")
     validation_dir: str = str(RESOURCE_DIR / "validations")
 
-    class Config:
-        """Pydantic settings configuration."""
-
-        env_file = BASE_DIR / ".env"
-        env_file_encoding = "utf-8"
-        extra = "ignore"
+    model_config = SettingsConfigDict(
+        env_file=BASE_DIR / ".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
 
 
 settings = Settings()

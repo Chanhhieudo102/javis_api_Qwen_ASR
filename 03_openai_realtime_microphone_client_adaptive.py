@@ -36,24 +36,30 @@ try:
 except Exception:
     pass
 
-def load_any_audio(file_path: str) -> np.ndarray:
-    """Load any audio format (.mp3, .wav, .m4a, .flac, .ogg, .aac, .webm, etc.) and convert to 16kHz mono float32."""
+# Tự động nạp thư mục backend để import AudioDSPService
+BACKEND_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "javis-api-qwen3-hf")
+if BACKEND_DIR not in sys.path:
+    sys.path.insert(0, BACKEND_DIR)
+
+try:
+    from app.voice2text.services.audio_dsp_service import AudioDSPService, StreamingDSPProcessor
+    from app.voice2text.constants.dsp_constants import AudioDSPMode
+    from app.voice2text.services.japanese_itn_service import JapaneseITNService
+except Exception:
+    AudioDSPService = None
+    StreamingDSPProcessor = None
+    AudioDSPMode = None
+    JapaneseITNService = None
+
+def load_any_audio(file_path: str, mode: str = "meeting") -> np.ndarray:
+    """Load any audio format (.mp3, .wav, .m4a, .flac, .ogg, .aac, .webm, etc.) with high-fidelity DSP resampling."""
+    data = None
+    sr = 16000
     try:
         import soundfile as sf
-        data, sr = sf.read(file_path)
-        audio_data = data.astype(np.float32)
-        if len(audio_data.shape) > 1:
-            audio_data = audio_data.mean(axis=1)
-
-        target_sr = 16000
-        if sr != target_sr:
-            num_target_samples = int(len(audio_data) * target_sr / sr)
-            audio_data = np.interp(
-                np.linspace(0, len(audio_data) - 1, num_target_samples),
-                np.arange(len(audio_data)),
-                audio_data
-            )
-        return np.clip(audio_data, -1.0, 1.0)
+        raw_data, orig_sr = sf.read(file_path)
+        data = raw_data.astype(np.float32)
+        sr = orig_sr
     except Exception as sf_err:
         import subprocess
         try:
@@ -61,17 +67,36 @@ def load_any_audio(file_path: str) -> np.ndarray:
             ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
             cmd = [
                 ffmpeg_exe, "-i", file_path,
-                "-f", "s16le", "-ac", "1", "-ar", "16000",
+                "-f", "f32le", "-ac", "1", "-ar", "16000",
                 "-loglevel", "error", "-"
             ]
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             out, _ = proc.communicate()
             if proc.returncode == 0 and len(out) > 0:
-                audio_data = np.frombuffer(out, dtype=np.int16).astype(np.float32) / 32767.0
-                return np.clip(audio_data, -1.0, 1.0)
+                data = np.frombuffer(out, dtype=np.float32)
+                sr = 16000
         except Exception:
             pass
-        raise RuntimeError(f"Không thể đọc file âm thanh {file_path}: {sf_err}")
+        if data is None:
+            raise RuntimeError(f"Không thể đọc file âm thanh {file_path}: {sf_err}")
+
+    # Chạy qua pipeline DSP hoàn chỉnh từ AudioDSPService nếu có
+    if AudioDSPService is not None:
+        num_ch = 1 if data.ndim == 1 else data.shape[1]
+        pcm_bytes = AudioDSPService.process_full_audio(data, orig_sr=sr, num_ch=num_ch, mode=mode)
+        return np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32) / 32767.0
+
+    # Fallback cơ bản nếu không nạp được AudioDSPService
+    if len(data.shape) > 1:
+        data = data.mean(axis=1)
+    if sr != 16000:
+        try:
+            import soxr
+            data = soxr.resample(data, sr, 16000).astype(np.float32)
+        except Exception:
+            num_samples = int(len(data) * 16000 / sr)
+            data = np.interp(np.linspace(0, len(data) - 1, num_samples), np.arange(len(data)), data)
+    return np.clip(data, -1.0, 1.0)
 
 # Monkey-patch Gradio & pydub để hỗ trợ mọi định dạng audio và microphone streaming không bị crash do thiếu ffprobe trên Windows
 _orig_audio_is_playable = gpu.audio_is_playable
@@ -86,7 +111,7 @@ gpu.audio_is_playable = _safe_audio_is_playable
 _orig_audio_from_file = getattr(gpu, "audio_from_file", None)
 def _safe_audio_from_file(filename: str, crop_min: float = 0, crop_max: float = 100):
     try:
-        data = load_any_audio(filename)
+        data = load_any_audio(filename, mode="meeting")
         pcm16 = (data * 32767).astype(np.int16)
         return 16000, pcm16
     except Exception:
@@ -102,15 +127,24 @@ try:
 except Exception:
     pass
 
-try:
-    from audio_enhancement_04 import get_pipeline, EnhancementPipeline
-except ImportError:
-    class EnhancementPipeline:
-        def run(self, chunk, sr=16000):
-            return chunk
+class EnhancementPipeline:
+    """Stateful DSP Pipeline wrapping StreamingDSPProcessor matching encode folder."""
+    def __init__(self, mode="meeting", sr=16000):
+        if StreamingDSPProcessor is not None:
+            self.processor = StreamingDSPProcessor(mode=mode, sample_rate=sr)
+        else:
+            self.processor = None
 
-    def get_pipeline(name="none"):
+    def run(self, chunk, sr=16000):
+        if self.processor is not None:
+            return self.processor.process_chunk(chunk)
+        return np.clip(chunk, -1.0, 1.0)
+
+def get_pipeline(name="none"):
+    if not name or str(name).lower() in ("none", "raw"):
         return None
+    mode = "ideal" if "ideal" in str(name).lower() else "meeting"
+    return EnhancementPipeline(mode=mode, sr=16000)
 
 # ==========================================
 # 0. CẤU HÌNH LOGGING GHI RA FILE JSON
@@ -142,6 +176,17 @@ TARGET_CHUNK_SAMPLES = 320
 internal_audio_buffer = np.array([], dtype=np.float32)
 
 CHOUON_PATTERN = re.compile(r'ー{2,}')
+STANDARD_ASR_HALLUCINATIONS = [
+    re.compile(r"ご視聴ありがとう.*?", re.IGNORECASE),
+    re.compile(r"チャンネル登録.*?", re.IGNORECASE),
+    re.compile(r"字幕.*?制作.*?", re.IGNORECASE),
+]
+
+def filter_hallucinations(text: str) -> str:
+    cleaned = text
+    for pat in STANDARD_ASR_HALLUCINATIONS:
+        cleaned = pat.sub("", cleaned)
+    return cleaned.strip()
 
 def normalize_chouon(text: str) -> str:
     """Collapse redundant long vowel marks (e.g. バール→バル)."""
@@ -292,10 +337,13 @@ async def websocket_handler():
                             elif msg_type in ("transcription.done", "final"):
                                 text = ""
                                 if msg_type == "final" and "segments" in data:
-                                    text = " ".join([seg.get("text", "") for seg in data.get("segments", [])])
+                                    text = " ".join([seg.get("text", "") for seg in data.get("segments", []) if seg.get("text")])
                                 else:
                                     text = data.get("text", "")
                                     
+                                text = filter_hallucinations(text)
+                                if JapaneseITNService is not None and text:
+                                    text = JapaneseITNService.normalize(text)
                                 if text:
                                     transcription_text += text + "\n"
                                     transcription_text = normalize_chouon(transcription_text)
@@ -621,6 +669,14 @@ def run_evaluation(current_transcript: str, selected_gt: str):
         return f"❌ **Không tìm thấy file Ground Truth:** `{selected_gt}`", "-", "-", "-"
     
     try:
+        # Lọc bỏ các dòng trạng thái streaming tạm thời "⏳ Đang dịch: ..."
+        clean_transcript = "\n".join([
+            line for line in current_transcript.split("\n")
+            if not line.strip().startswith("⏳")
+        ]).strip()
+        if not clean_transcript:
+            return "⚠️ **Không có nội dung transcript hoàn chỉnh để đánh giá!**", "-", "-", "-"
+
         with open(gt_file_path, 'r', encoding='utf-8') as f:
             ground_truth = f.read()
 
@@ -628,9 +684,9 @@ def run_evaluation(current_transcript: str, selected_gt: str):
         gt_std = asr_evaluator.normalize_standard(ground_truth)
         gt_loose = asr_evaluator.normalize_loose(ground_truth)
 
-        hyp_strict = asr_evaluator.normalize_strict(current_transcript)
-        hyp_std = asr_evaluator.normalize_standard(current_transcript)
-        hyp_loose = asr_evaluator.normalize_loose(current_transcript)
+        hyp_strict = asr_evaluator.normalize_strict(clean_transcript)
+        hyp_std = asr_evaluator.normalize_standard(clean_transcript)
+        hyp_loose = asr_evaluator.normalize_loose(clean_transcript)
 
         cer_strict = asr_evaluator.calc_cer(gt_strict, hyp_strict)
         cer_std = asr_evaluator.calc_cer(gt_std, hyp_std)

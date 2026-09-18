@@ -207,25 +207,7 @@ async def transcribe_stream_websocket(
                             if target_time > now:
                                 await asyncio.sleep(target_time - now)
 
-                        # 4. Gửi đệm khoảng lặng (silence tail) 400ms để server chốt VAD và phát hết từ cuối
-                        silence_len = int(16000 * 2 * 0.4)  # 400ms silence tail (vừa đủ VAD, không gây ảo giác)
-                        silence_bytes = b'\x00' * silence_len
-                        for sil_offset in range(0, silence_len, chunk_size):
-                            if stop_event.is_set():
-                                break
-                            chunk = silence_bytes[sil_offset:sil_offset + chunk_size]
-                            b64_chunk = base64.b64encode(chunk).decode("utf-8")
-                            await ws.send(json.dumps({
-                                "type": "input_audio_buffer.append",
-                                "audio": b64_chunk
-                            }))
-                            chunk_idx += 1
-                            target_time = start_stream_time + chunk_idx * step_delay
-                            now = time.perf_counter()
-                            if target_time > now:
-                                await asyncio.sleep(target_time - now)
-
-                        # 5. Gửi commit final sau khi đệm xong silence tail
+                        # 4. Gửi commit final ngay khi hết audio stream
                         if not stop_event.is_set():
                             await ws.send(json.dumps({"type": "input_audio_buffer.commit", "final": True}))
                             commit_time = time.time()

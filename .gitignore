@@ -23,3 +23,9 @@ client_logs.jsonl
 .idea/
 .DS_Store
 Thumbs.db
+
+# Reference directory
+encode/
+
+# Scratch & temporary test files
+scratch/

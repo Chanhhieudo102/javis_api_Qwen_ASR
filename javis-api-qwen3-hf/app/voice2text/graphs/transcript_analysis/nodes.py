@@ -9,6 +9,8 @@ from app.voice2text.graphs.transcript_analysis.helpers import (
 )
 from app.voice2text.graphs.transcript_analysis.state import TranscriptAnalysisState
 
+DEFAULT_TRANSCRIPT_LANGUAGE: str = "Japanese"
+
 
 class TranscriptAnalysisCleanPunctuateNode(BaseChatNode):
     """Class node that cleans, punctuates, and normalizes raw ASR transcript."""
@@ -17,7 +19,7 @@ class TranscriptAnalysisCleanPunctuateNode(BaseChatNode):
         """Clean and punctuate raw transcript text using ChatModel."""
         user_prompt = build_punctuate_prompt(
             raw_transcript=state["raw_transcript"],
-            language=state.get("language", "Japanese"),
+            language=state.get("language", DEFAULT_TRANSCRIPT_LANGUAGE),
         )
         messages = build_chat_messages(
             system_prompt=self.system_prompt,
@@ -35,7 +37,7 @@ class TranscriptAnalysisSummarizeNode(BaseChatNode):
         """Summarize conversation and extract action items from cleaned transcript."""
         user_prompt = build_summarize_prompt(
             cleaned_transcript=state.get("cleaned_transcript", state["raw_transcript"]),
-            language=state.get("language", "Japanese"),
+            language=state.get("language", DEFAULT_TRANSCRIPT_LANGUAGE),
         )
         messages = build_chat_messages(
             system_prompt=self.system_prompt,

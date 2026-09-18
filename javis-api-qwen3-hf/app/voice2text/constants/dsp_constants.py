@@ -36,6 +36,18 @@ class DSPConstants:
     COMP_MAKEUP_GAIN_DB: float = 0.0
 
     # VAD parameters for Silero VAD (used in transcription_ws_service)
-    VAD_THRESHOLD: float = 0.18          # conservative: 0.15 caused false triggers
-    VAD_MIN_SILENCE_MS: int = 750        # balance: 650 too aggressive, 800 too slow
-    VAD_PREROLL_SEC: float = 1.5         # audio pre-roll buffer before speech start
+    VAD_THRESHOLD: float = 0.20          # optimal: captures quiet telephony speech without clipping onsets
+    VAD_MIN_SILENCE_MS: int = 750        # balance: 750ms prevents mid-clause premature cuts
+    VAD_PREROLL_SEC: float = 1.2         # 1.2s pre-roll ensures onset phonemes (consonants/vowels) are not clipped
+
+    # Streaming WebSocket & VAD buffer thresholds
+    PCM16_MAX_AMPLITUDE: float = 32768.0
+    VAD_FRAME_SAMPLES: int = 512
+    VAD_FRAME_BYTES: int = 1024          # 512 samples * 2 bytes (PCM16)
+    MIN_SPEECH_DURATION_SEC: float = 0.35
+    MIN_SPEECH_RMS: float = 0.010        # ~ -40 dBFS threshold for speech presence
+    MIN_UNCONFIRMED_SPEECH_RMS: float = 0.012
+    MAX_SEGMENT_SECONDS: float = 29.0
+    SHORT_AUDIO_HALLUCINATION_SEC: float = 1.5
+    PING_INTERVAL_SEC: float = 30.0
+    SEGMENT_ORDER_POLL_INTERVAL_SEC: float = 0.05

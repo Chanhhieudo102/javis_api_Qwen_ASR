@@ -28,6 +28,8 @@ image = (
         "onnxruntime",
         "librosa",
         "soundfile",
+        "scipy",
+        "soxr",
         "langgraph>=0.2.0",
         "langchain-core>=0.3.0",
         "langchain-openai>=0.2.0",
@@ -84,7 +86,7 @@ def serve() -> FastAPI:
     import sys
     import os
     
-    # Chỉ định đường dẫn tới thư mục chứa module `app`
+    # Reload trigger: v2 - reload all submodules
     sys.path.insert(0, "/root/javis-api-qwen3-hf")
     sys.path.insert(0, "/root")
     
@@ -92,3 +94,4 @@ def serve() -> FastAPI:
     from app.main import app as fastapi_app
     
     return fastapi_app
+

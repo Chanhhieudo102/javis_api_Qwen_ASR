@@ -1,8 +1,9 @@
 import asyncio
 import base64
 import json
+import re
 import time
-from typing import Optional
+from typing import ClassVar, Optional, Set
 
 import numpy as np
 import torch
@@ -32,6 +33,36 @@ logger = get_logger(__name__)
 # Global semaphore to cap concurrent sessions
 _session_semaphore = asyncio.Semaphore(MAX_CONCURRENT_SESSIONS)
 
+# Precompiled pattern for punctuation and whitespace removal
+_PUNCTUATION_AND_WHITESPACE_PATTERN: re.Pattern = re.compile(
+    r"[\s\u3000、。・！？!?,.\-—~～]+"
+)
+
+# Common short hallucination phrases triggered by non-speech noise
+_SHORT_AUDIO_HALLUCINATIONS: Set[str] = frozenset({"釣り", "つり"})
+
+
+def _pcm_to_float_array(pcm_bytes: bytes) -> np.ndarray:
+    """Convert 16-bit PCM byte buffer to normalized float32 array [-1.0, 1.0]."""
+    if not pcm_bytes:
+        return np.empty(0, dtype=np.float32)
+    return np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32) / DSPConstants.PCM16_MAX_AMPLITUDE
+
+
+def _calculate_rms(float_arr: np.ndarray) -> float:
+    """Calculate Root Mean Square (RMS) energy of an audio sample array."""
+    return float(np.sqrt(np.mean(float_arr ** 2))) if len(float_arr) > 0 else 0.0
+
+
+def _bytes_to_duration_sec(byte_count: int) -> float:
+    """Convert raw PCM16 byte length to duration in seconds at target sample rate."""
+    return byte_count / (DSPConstants.TARGET_SAMPLE_RATE * DSPConstants.BYTES_PER_SAMPLE)
+
+
+def _duration_sec_to_bytes(seconds: float) -> int:
+    """Convert duration in seconds to raw PCM16 byte length at target sample rate."""
+    return int(seconds * DSPConstants.TARGET_SAMPLE_RATE * DSPConstants.BYTES_PER_SAMPLE)
+
 
 class NoDiarizationStreamSession:
     """Manages one WebSocket transcription session (no speaker diarization)."""
@@ -40,20 +71,20 @@ class NoDiarizationStreamSession:
         self.websocket: WebSocket = websocket
         self.engine: HFEngine = HFEngine.get_instance()
         self.vad_iterator = self.engine.create_vad_iterator()
-        
+
         self.audio_buffer = bytearray()
         self.vad_buffer = bytearray()
-        
+
         self.is_speaking: bool = False
         self.is_transcribing: bool = False
         self.last_transcribed_bytes: int = 0
         self.accumulated_offset_ms: int = 0
         self.segment_id: int = 1
         self.next_segment_to_send: int = 1
-        self.transcribe_tasks = []
-        
-        # Max segment ~ 29s
-        self.MAX_SEGMENT_BYTES = 16000 * 2 * 29
+        self.transcribe_tasks: list[asyncio.Task] = []
+
+        self.max_segment_bytes: int = _duration_sec_to_bytes(DSPConstants.MAX_SEGMENT_SECONDS)
+        self.preroll_bytes: int = _duration_sec_to_bytes(DSPConstants.VAD_PREROLL_SEC)
 
         self._running: bool = True
         self._ping_task: Optional[asyncio.Task] = None
@@ -102,40 +133,45 @@ class NoDiarizationStreamSession:
 
     async def _process_audio(self, pcm_chunk: bytes) -> None:
         """Process incoming raw PCM 16kHz 16-bit bytes."""
-        preroll_bytes = int(16000 * 2 * DSPConstants.VAD_PREROLL_SEC)
-        if not self.is_speaking and len(self.audio_buffer) >= preroll_bytes:
+        if not self.is_speaking and len(self.audio_buffer) >= self.preroll_bytes:
             # Keep VAD_PREROLL_SEC of audio context to avoid swallowing sentence-initial sounds
-            self.audio_buffer = self.audio_buffer[-preroll_bytes:]
+            self.audio_buffer = self.audio_buffer[-self.preroll_bytes:]
 
         self.audio_buffer.extend(pcm_chunk)
         self.vad_buffer.extend(pcm_chunk)
 
-        # Safety cap: force-cut at MAX_SEGMENT_BYTES regardless of VAD
-        if len(self.audio_buffer) >= self.MAX_SEGMENT_BYTES:
-            logger.info(f"[VAD] FORCE CUT at {len(self.audio_buffer)/(16000*2):.1f}s (safety cap)")
+        # Safety cap: force-cut at max_segment_bytes regardless of VAD
+        if len(self.audio_buffer) >= self.max_segment_bytes:
+            duration = _bytes_to_duration_sec(len(self.audio_buffer))
+            logger.info(f"[VAD] FORCE CUT at {duration:.1f}s (safety cap)")
             self._flush_buffer()
             return
 
-        # Process VAD in 512-sample chunks (1024 bytes)
-        while len(self.vad_buffer) >= 1024:
-            vad_chunk_bytes = self.vad_buffer[:1024]
-            self.vad_buffer = self.vad_buffer[1024:]
+        # Process VAD in fixed chunk size
+        vad_frame_bytes = DSPConstants.VAD_FRAME_BYTES
+        while len(self.vad_buffer) >= vad_frame_bytes:
+            vad_chunk_bytes = self.vad_buffer[:vad_frame_bytes]
+            self.vad_buffer = self.vad_buffer[vad_frame_bytes:]
 
-            arr = np.frombuffer(vad_chunk_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+            arr = _pcm_to_float_array(vad_chunk_bytes)
             tensor = torch.from_numpy(arr)
 
             speech_dict = self.vad_iterator(tensor, return_seconds=False)
             if speech_dict:
-                if 'start' in speech_dict:
+                if "start" in speech_dict:
                     self.is_speaking = True
-                elif 'end' in speech_dict:
-                    logger.debug(f"[VAD] Speech END -> transcribing {len(self.audio_buffer)/(16000*2):.1f}s")
+                elif "end" in speech_dict:
+                    duration = _bytes_to_duration_sec(len(self.audio_buffer))
+                    logger.debug(f"[VAD] Speech END -> transcribing {duration:.1f}s")
                     self._flush_buffer()
 
-        if self.is_speaking and (len(self.audio_buffer) - self.last_transcribed_bytes >= 16000):
+        # Emit partial if speaking and buffer increased significantly
+        bytes_threshold = DSPConstants.TARGET_SAMPLE_RATE  # ~0.5s of audio
+        if self.is_speaking and (len(self.audio_buffer) - self.last_transcribed_bytes >= bytes_threshold):
             asyncio.create_task(self._do_partial())
 
-    async def _do_partial(self):
+    async def _do_partial(self) -> None:
+        """Execute a partial speculative transcription pass."""
         if self.is_transcribing or len(self.audio_buffer) == 0:
             return
         self.is_transcribing = True
@@ -147,42 +183,67 @@ class NoDiarizationStreamSession:
         finally:
             self.is_transcribing = False
 
-    def _flush_buffer(self):
-        # Tránh dịch đoạn silence đuôi khi người dùng đã dừng nói để loại bỏ triệt để ảo giác (hallucination)
+    def _is_speech_eligible(self, duration_sec: float, rms: float) -> bool:
+        """Evaluate if the buffered audio meets minimum duration and energy thresholds."""
+        has_min_duration = duration_sec >= DSPConstants.MIN_SPEECH_DURATION_SEC
+        has_speech_energy = rms >= DSPConstants.MIN_SPEECH_RMS
+        is_confirmed_or_loud = self.is_speaking or (rms >= DSPConstants.MIN_UNCONFIRMED_SPEECH_RMS)
+        return has_min_duration and has_speech_energy and is_confirmed_or_loud
+
+    def _flush_buffer(self) -> None:
+        """Flush audio buffer and initiate final transcription if speech is confirmed."""
         if len(self.audio_buffer) > 0:
             buf = bytes(self.audio_buffer)
-            arr = np.frombuffer(buf, dtype=np.int16).astype(np.float32) / 32768.0
-            rms = float(np.sqrt(np.mean(arr ** 2))) if len(arr) > 0 else 0.0
-            # Chỉ phiên âm nếu đang có tiếng nói (is_speaking) HOẶC có năng lượng giọng nói thực tế (RMS >= -42 dBFS = 0.008)
-            if self.is_speaking or (rms >= 0.008 and len(self.audio_buffer) >= 16000 * 2 * 0.5):
+            float_arr = _pcm_to_float_array(buf)
+            rms = _calculate_rms(float_arr)
+            buf_duration_sec = _bytes_to_duration_sec(len(buf))
+
+            if self._is_speech_eligible(buf_duration_sec, rms):
                 current_seg = self.segment_id
                 self.segment_id += 1
-                task = asyncio.create_task(self._transcribe_buffer(buf, is_final=True, target_segment_id=current_seg))
+                task = asyncio.create_task(
+                    self._transcribe_buffer(buf, is_final=True, target_segment_id=current_seg)
+                )
                 self.transcribe_tasks.append(task)
             else:
-                logger.debug(f"[VAD] Dropped silence/noise tail: {len(buf)/(16000*2):.2f}s, RMS={rms:.4f}")
-            
+                logger.debug(
+                    f"[VAD] Dropped silence/noise tail: {buf_duration_sec:.2f}s, RMS={rms:.4f}"
+                )
+
         self.audio_buffer.clear()
         self.is_speaking = False
         self.last_transcribed_bytes = 0
         self.vad_iterator.reset_states()
 
-    async def _transcribe_buffer(self, pcm_bytes: bytes, is_final: bool = False, target_segment_id: int = 0):
-        # Run inference in a background thread to unblock event loop
+    async def _transcribe_buffer(
+        self, pcm_bytes: bytes, is_final: bool = False, target_segment_id: int = 0
+    ) -> None:
+        """Run ASR model inference, post-process text, and send responses."""
         text = await asyncio.to_thread(self.engine.generate_text, pcm_bytes)
         if text:
             text = JapaneseITNService.normalize(text)
-        
+            stripped = _PUNCTUATION_AND_WHITESPACE_PATTERN.sub("", text)
+            duration_sec = _bytes_to_duration_sec(len(pcm_bytes))
+
+            # Discard empty/punctuation-only segments or common short hallucination triggers
+            if not stripped:
+                text = ""
+            elif (
+                stripped in _SHORT_AUDIO_HALLUCINATIONS
+                and duration_sec < DSPConstants.SHORT_AUDIO_HALLUCINATION_SEC
+            ):
+                text = ""
+
         duration_ms = int(len(pcm_bytes) / 2 / SAMPLES_PER_MS)
 
         if is_final:
             while self.next_segment_to_send < target_segment_id:
-                await asyncio.sleep(0.05)
-            
+                await asyncio.sleep(DSPConstants.SEGMENT_ORDER_POLL_INTERVAL_SEC)
+
             if text:
-                # Soniox logic: emit empty partial first, then emit final
+                # Soniox protocol: emit empty partial first, then final segment
                 await self._send_model(WsPartialResponse(text=""))
-                
+
                 segment = SonioxSegment(
                     text=text,
                     speaker_id=DEFAULT_SPEAKER_ID,
@@ -190,15 +251,14 @@ class NoDiarizationStreamSession:
                     duration=duration_ms,
                 )
                 await self._send_model(WsFinalResponse(segments=[segment]))
-                
+
                 # Accumulate offset only on valid final segments
                 self.accumulated_offset_ms += duration_ms
 
             self.next_segment_to_send += 1
         else:
-            if text:
-                if target_segment_id == self.segment_id and target_segment_id >= self.next_segment_to_send:
-                    await self._send_model(WsPartialResponse(text=text))
+            if text and target_segment_id == self.segment_id and target_segment_id >= self.next_segment_to_send:
+                await self._send_model(WsPartialResponse(text=text))
 
     async def _handle_text_message(self, text: str) -> None:
         """Handle client JSON messages (e.g. pong, time_start)."""
@@ -236,7 +296,7 @@ class NoDiarizationStreamSession:
         """Send periodic pings to keep the connection alive."""
         try:
             while self._running:
-                await asyncio.sleep(30)
+                await asyncio.sleep(DSPConstants.PING_INTERVAL_SEC)
                 ts = int(time.time() * 1000)
                 await self._send_model(WsPingResponse(ts=ts))
         except asyncio.CancelledError:
@@ -248,7 +308,6 @@ class NoDiarizationStreamSession:
             await self.websocket.send_text(model.model_dump_json(exclude_none=True))
         except Exception:
             self._running = False
-
 
     async def _send_json(self, obj: dict) -> None:
         """Send a raw dict as JSON text."""
