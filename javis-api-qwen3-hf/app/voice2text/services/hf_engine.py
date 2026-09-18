@@ -128,8 +128,9 @@ class HFEngine:
                     **inputs,
                     max_new_tokens=384,
                     do_sample=False,
-                    num_beams=1,
-                    repetition_penalty=1.02,
+                    num_beams=2,
+                    length_penalty=1.0,
+                    repetition_penalty=1.0,
                     pad_token_id=self.processor.tokenizer.pad_token_id,
                     eos_token_id=self.processor.tokenizer.eos_token_id,
                 )

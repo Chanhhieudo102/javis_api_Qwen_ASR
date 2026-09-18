@@ -185,10 +185,17 @@ class NoDiarizationStreamSession:
 
     def _is_speech_eligible(self, duration_sec: float, rms: float) -> bool:
         """Evaluate if the buffered audio meets minimum duration and energy thresholds."""
-        has_min_duration = duration_sec >= DSPConstants.MIN_SPEECH_DURATION_SEC
-        has_speech_energy = rms >= DSPConstants.MIN_SPEECH_RMS
+        if duration_sec < DSPConstants.MIN_SPEECH_DURATION_SEC:
+            return False
+        # Short segments (<0.8s) require higher energy to filter out breaths and line clicks
+        required_rms = (
+            DSPConstants.SHORT_SEGMENT_ENERGY_THRESHOLD
+            if duration_sec < 0.8
+            else DSPConstants.MIN_SPEECH_RMS
+        )
+        has_speech_energy = rms >= required_rms
         is_confirmed_or_loud = self.is_speaking or (rms >= DSPConstants.MIN_UNCONFIRMED_SPEECH_RMS)
-        return has_min_duration and has_speech_energy and is_confirmed_or_loud
+        return has_speech_energy and is_confirmed_or_loud
 
     def _flush_buffer(self) -> None:
         """Flush audio buffer and initiate final transcription if speech is confirmed."""
