@@ -61,10 +61,11 @@ volumes = {
     "/mnt/VOICE": modal.Volume.from_name(name="VOICE", create_if_missing=True)
 }
 
-# Secrets: Tắt DB (ENABLE_DB=false) + đọc .env cho QWEN_MODEL_NAME
+# Secrets: Tắt DB (ENABLE_DB=false) + trỏ trực tiếp vào volume VOICE đã tải sẵn model
 app_secrets = [
     modal.Secret.from_dict({
         "ENABLE_DB": "false",
+        "QWEN_MODEL_NAME": "/mnt/VOICE/models/Qwen3-ASR-1.7B-hf",
     })
 ]
 

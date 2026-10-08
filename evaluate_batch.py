@@ -64,7 +64,7 @@ except ImportError:
 
 from cer import JapaneseASREvaluator, clean_text, levenshtein_distance, get_alignment
 
-DEFAULT_WS_URL = "wss://uydo8081--javis-api-qwen3-hf-serve-serve-dev.modal.run/api/v2/transcript/ws/no-diarization"
+DEFAULT_WS_URL = "wss://uydo8081--javis-api-qwen3-hf-serve-serve.modal.run/api/v2/transcript/ws/no-diarization"
 AUDIO_DIR = BASE_DIR / "all_audio_input"
 GT_DIR = BASE_DIR / "ground_truth"
 RESULTS_DIR = BASE_DIR / "results"

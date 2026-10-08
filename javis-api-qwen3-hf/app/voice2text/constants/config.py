@@ -1,7 +1,9 @@
 import os
 
 # --- Model ---
-MODEL_NAME = os.getenv("QWEN_MODEL_NAME", "Qwen/Qwen3-ASR-1.7B")
+LOCAL_VOICE_MODEL = "/mnt/VOICE/models/Qwen3-ASR-1.7B-hf"
+DEFAULT_MODEL = LOCAL_VOICE_MODEL if os.path.exists(LOCAL_VOICE_MODEL) else "Qwen/Qwen3-ASR-1.7B"
+MODEL_NAME = os.getenv("QWEN_MODEL_NAME", DEFAULT_MODEL)
 GPU_MEMORY_UTILIZATION = float(os.getenv("GPU_MEMORY_UTILIZATION", "0.6"))
 
 # --- Audio ---
